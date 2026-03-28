@@ -1,19 +1,35 @@
-import express, { Request, Response } from 'express';
-import cors from 'cors';
+import express from "express";
+import cors from "cors";
+import dotenv from "dotenv";
+import router from "./routes/index";
+
+dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT ?? 5000;
 
 app.use(cors());
 app.use(express.json());
 
-app.post('/api/sort-log', (req: Request, res: Response) => {
-    const { itemId, classification, destination } = req.body;
-    console.log(`[Audit] Item ${itemId}: ${classification} routed to ${destination}`);
-    
-    res.status(201).send({ message: "Sort decision logged successfully." });
+app.use("/api", router);
+
+app.get("/", (_req, res) => {
+  res.json({
+    name: "OmniReach Chaos Agent API",
+    version: "1.0.0",
+    endpoints: {
+      serverHealth:        "GET /api/server-health",
+      humanitarianReports: "GET /api/humanitarian-reports",
+      disasterAlerts:      "GET /api/disaster-alerts",
+      conflictNews:        "GET /api/conflict-news",
+      chaosAnalysis:       "GET /api/chaos-analysis",
+      allRawData:          "GET /api/chaos-analysis/raw-data",
+    },
+  });
 });
 
 app.listen(PORT, () => {
-    console.log(`OmniReach Server running on http://localhost:${PORT}`);
+  console.log(`Server running on http://localhost:${PORT}`);
 });
+
+export default app;
