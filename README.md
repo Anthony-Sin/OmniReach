@@ -1,63 +1,91 @@
-# Aegis Disaster-Response Agent Workforce
+This is a comprehensive update to your `README.md`, transitioning the project from "Aegis" to **OMIREACH**. This version incorporates your new mission statement, the technical "A2A" (Analysis-to-Action) narrative, and the specific logic for mission efficiency.
 
-Aegis is an autonomous disaster-response workforce built as a system of agents, not a chatbot. It observes global incidents, reasons across competing needs, assembles relief plans, executes robotic and delivery workflows, and performs real outward handoff actions through operational incident exports.
+---
 
-“Aegis does not stop at analysis. After coordinating the response, it generates an operational incident export packet that a human relief team can immediately use for field execution, partner escalation, or command-center review.”
+# 🌐 OMIREACH: Simulated Disaster-Response Workforce
 
-## Workforce Design
+**OMIREACH** is an autonomous disaster-response system designed as a workforce of specialized agents, not a chatbot. It bridges the **Analysis-to-Action (A2A) Gap** by observing global incidents, reasoning across competing humanitarian needs, and generating simulated robotic logistics and operational handoff artifacts.
 
-- `Sentinel` is the observer worker. It monitors multi-level GDACS incidents and publishes normalized alerts.
-- `Intel` is the enrichment worker. It adds ReliefWeb humanitarian context and USGS flood observations through the A2A workflow.
-- `Triage` is the prioritization worker. It ranks zones and selects the mission target.
-- `Assembly` is the planning worker. It designs specialized kits for the chosen mission.
-- `Logistics` is the sequencing worker. It condenses a kit into a compact robotic pick plan.
-- `Robotics` is the assembly execution worker. It assigns an available arm and runs the physical kit build workflow.
-- `Delivery` is the field transport worker. It chooses a route and transport mode using current weather risk.
-- `Action` is the outward operations worker. It exports incident packets and can dispatch partner webhooks for real-world handoff.
-- `Coordinator` is the orchestration worker. It owns mission state, queue dispatch, event ordering, and cross-agent completion.
+> "OMIREACH does not stop at analysis. It moves beyond 'summarizing' a disaster to 'solving' it through a high-fidelity agentic ecosystem that creates structured, field-ready incident exports."
 
-## Queue-Based Boundaries
+---
 
-Aegis models independently deployable worker lanes even when running in one process. Coordinator dispatches work through named queues such as:
+## 🏗️ Workforce Architecture
+OMIREACH utilizes the **Google Agent Development Kit (ADK)** to define distinct, decoupled worker lanes.
 
-- `sentinel-observer`
-- `triage-worker`
-- `intel-worker`
-- `assembly-worker`
-- `logistics-worker`
-- `robotics-worker`
-- `delivery-worker`
-- `action-worker`
+* **`Sentinel` (The Observer):** Monitors live **GDACS** and **USGS** feeds to identify and normalize global incident alerts.
+* **`Intel` (The Enricher):** Adds humanitarian context via **ReliefWeb** and environmental data using `ParallelAgent` workflows.
+* **`Triage` (The Strategist):** Ranks zones and selects mission targets based on urgency and impact.
+* **`Assembly` (The Architect):** Designs specialized kits (Medical, Food, Shelter) using `LoopAgent` for iterative verification.
+* **`Logistics` (The Sequencer):** Calculates efficient routes and condenses kits into compact robotic pick plans.
+* **`Robotics` (The Constructor):** Assigns simulated hardware and executes the physical kit build workflow.
+* **`Delivery` (The Navigator):** Determines transport modes and paths by factoring in real-time weather risks.
+* **`Action` (The Operator):** Generates the **Operational Incident Export** and dispatches partner webhooks.
+* **`Coordinator` (The Orchestrator):** Manages mission state, event ordering, and cross-agent completion rules.
 
-These boundaries make the A2A workflow explicit and provide a clean path to splitting the system into separate services later.
+---
 
-## Real Act Layer
+## 📐 The Logic of Logistics
+To ensure the **Logistics** agent prioritizes the highest-impact missions, the system calculates the efficiency of a proposed mission $M$ using distance $d$, weather risk $\omega$, and urgency $\mu$:
 
-After delivery arrives, Aegis does not stop at analysis:
+$$\text{Efficiency}(M) = \frac{\mu}{d \cdot \omega}$$
 
-- It writes a structured incident packet to an operational outbox.
-- It produces a handoff artifact a human relief team can use immediately.
-- It records which action channels were used for the mission handoff.
 
-## Runtime APIs
 
-- `GET /api/health` returns service health.
-- `POST /api/missions/start` starts a new mission.
-- `GET /api/system/queues` returns the active worker queue snapshot.
+---
 
-## Environment
+## 🚦 Queue-Based Boundaries
+OMIREACH models independently deployable worker lanes. The **Coordinator** dispatches work through named queues to ensure a clean path to microservices:
 
-Set these values in `.env.local` or your process environment:
+* `sentinel-observer` | `intel-worker` | `triage-worker`
+* `assembly-worker` | `logistics-worker` | `robotics-worker`
+* `delivery-worker` | `action-worker`
 
-- `GEMINI_API_KEY`
-- `GOOGLE_MAPS_API_KEY`
-- `AEGIS_WEBHOOK_URL` optional
-- `AEGIS_PARTNER_NAME` optional
-- `AEGIS_OUTBOX_DIR` optional
+---
 
-## Run Locally
+## 🛠️ Tech Stack
+* **Core Reasoning:** Gemini API
+* **Orchestration:** Node.js & Google Agent Development Kit (ADK)
+* **Operator UI:** Next.js, React, TypeScript
+* **Geospatial:** Google Maps API (Live incident visualization)
+* **Data Sources:** GDACS (Global Disaster Alert and Coordination System), USGS, ReliefWeb
 
-1. Install dependencies with `npm install`.
-2. Configure the environment variables.
-3. Start the workforce with `npm run dev`.
-4. Run verification with `npm run lint` and `npm test`.
+---
+
+## 🚀 Getting Started
+
+### Environment Variables
+Create a `.env.local` file with the following:
+```bash
+GEMINI_API_KEY=your_key_here
+GOOGLE_MAPS_API_KEY=your_key_here
+AEGIS_WEBHOOK_URL=optional_callback_url
+AEGIS_OUTBOX_DIR=./outbox
+```
+
+### Installation & Run
+1.  **Install dependencies:**
+    ```bash
+    npm install
+    ```
+2.  **Start the workforce:**
+    ```bash
+    npm run dev
+    ```
+3.  **Validation:**
+    ```bash
+    npm run lint
+    npm test
+    ```
+
+### Runtime APIs
+* `GET /api/health`: Service status.
+* `POST /api/missions/start`: Manually trigger a new autonomous mission cycle.
+* `GET /api/system/queues`: View a live snapshot of active worker queues.
+
+---
+
+## 🚧 Challenges & Learnings
+Building OMIREACH taught us that the future of relief lies in **Agentic Orchestration**. We overcame the "Simulated Autonomy" hurdle by building a Coordinator that handles event ordering without human intervention, ensuring a seamless hand-off between "Data Agents" and "Mechanical Agents."
+
+**Would you like me to help you draft the `Action-Worker` logic to format the final Incident Export packet?**
