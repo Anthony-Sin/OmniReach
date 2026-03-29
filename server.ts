@@ -8,9 +8,9 @@ import { fileURLToPath } from 'url';
 import { CoordinatorAgentClass, coordinatorAgent } from './src/agents/CoordinatorAgent';
 import { missionStore } from './src/lib/missionStore';
 import { MissionEventType } from './src/types/mission';
-import { MOCK_INVENTORY } from './src/lib/pickPlanner';
-import { InventoryAgent } from './src/agents/InventoryAgent';
 import { workerQueues } from './src/lib/workerQueue';
+import { createDisasterSpecialistA2AApp } from './src/lib/a2aSpecialist';
+import { getApiUsageSnapshot, registerMapLoad, registerMissionStart } from './src/lib/apiUsageBudget';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -27,10 +27,11 @@ async function startServer() {
 
   const PORT = 3000;
 
+  await createDisasterSpecialistA2AApp(app);
+
   // Initialize Aegis Coordinator
   console.log('Initializing Aegis Coordinator...');
   CoordinatorAgentClass.init();
-  InventoryAgent.init();
   
   const unsubscribe = coordinatorAgent.onMessage((event) => {
     // Broadcast mission events to all connected clients
@@ -46,7 +47,7 @@ async function startServer() {
     console.log(`[Socket] Client connected: ${socket.id}`);
     
     socket.on('robotics_complete', async (data) => {
-      const { missionId, armId } = data;
+      const { missionId, armId, workspaceImage, boxImage } = data;
       console.log(`[Socket] Received robotics_complete for mission ${missionId} on arm ${armId}`);
       
       // We need to trigger the completion logic in RoboticsAgent
@@ -57,7 +58,7 @@ async function startServer() {
       const mission = missionStore.getMission(missionId);
       if (mission) {
         // We'll add a static method to RoboticsAgent to handle this external completion
-        await (RoboticsAgent as any).handleExternalCompletion(missionId, armId);
+        await (RoboticsAgent as any).handleExternalCompletion(missionId, armId, { workspaceImage, boxImage });
       }
     });
 
@@ -75,31 +76,20 @@ async function startServer() {
     res.json(workerQueues.snapshot());
   });
 
-  // Handle supply level updates
-  app.post('/api/inventory/supply-level', express.json(), (req, res) => {
-    const { level } = req.body;
-    if (['low', 'medium', 'high'].includes(level)) {
-      InventoryAgent.setSupplyLevel(level);
-      io.emit('supply_level_changed', { level });
-      res.json({ success: true, level });
-    } else {
-      res.status(400).json({ error: 'Invalid supply level' });
-    }
+  app.get('/api/system/usage', (req, res) => {
+    res.json(getApiUsageSnapshot());
   });
 
-  app.get('/api/inventory/stock', (req, res) => {
-    const items = Object.keys(MOCK_INVENTORY);
-    const stock = items.map(item => ({
-      name: item,
-      ...InventoryAgent.query(item)
-    }));
-    res.json(stock);
+  app.post('/api/system/map-load', (req, res) => {
+    registerMapLoad();
+    res.json({ ok: true });
   });
 
   // Handle manual mission triggers if needed
   app.post('/api/missions/start', express.json(), async (req, res) => {
     try {
       const { zone } = req.body;
+      registerMissionStart();
       const missionId = await CoordinatorAgentClass.startNewMission(zone);
       
       // Send initial mission state to client

@@ -73,49 +73,6 @@ export const ActionOutputSchema = z.object({
   success: z.boolean()
 });
 
-export const InventoryClaimInputSchema = z.object({
-  item: z.string(),
-  missionId: z.string()
-});
-export const InventoryClaimOutputSchema = z.object({
-  success: z.boolean(),
-  claimedBy: z.string().optional()
-});
-
-export const InventoryReleaseInputSchema = z.object({
-  item: z.string(),
-  missionId: z.string()
-});
-export const InventoryReleaseOutputSchema = z.object({
-  success: z.boolean()
-});
-
-export const InventoryConsumeMissionInputSchema = z.object({
-  missionId: z.string()
-});
-export const InventoryConsumeMissionOutputSchema = z.object({
-  success: z.boolean(),
-  consumedItems: z.array(z.string())
-});
-
-export const InventoryQueryInputSchema = z.object({
-  item: z.string()
-});
-export const InventoryQueryOutputSchema = z.object({
-  available: z.boolean(),
-  claimedBy: z.array(z.string()).optional(),
-  quantity: z.number().optional()
-});
-
-export const InventoryCheckStockInputSchema = z.object({
-  items: z.array(z.string())
-});
-export const InventoryCheckStockOutputSchema = z.object({
-  availableItems: z.array(z.string()),
-  missingItems: z.array(z.string()),
-  stockLevels: z.record(z.string(), z.number())
-});
-
 export const CoordinatorInputSchema = z.object({
   zone: ZoneSchema.optional()
 });

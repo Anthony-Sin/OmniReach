@@ -68,10 +68,10 @@ export class MujocoSim {
         this.renderSys.initLights(this.dragStateManager);
     }
 
-    async init(robotId = 'franka_emika_panda', sceneFile = 'scene.xml', disasterType: DisasterType = 'flood', supplyLevel: 'low' | 'medium' | 'high' = 'high', onProgress?: (msg: string) => void) {
-        console.log(`[MujocoSim] Initializing with robot: ${robotId}, scene: ${sceneFile}, disaster: ${disasterType}, supply: ${supplyLevel}`);
+    async init(robotId = 'franka_emika_panda', sceneFile = 'scene.xml', disasterType: DisasterType = 'flood', onProgress?: (msg: string) => void) {
+        console.log(`[MujocoSim] Initializing with robot: ${robotId}, scene: ${sceneFile}, disaster: ${disasterType}`);
         const loader = new RobotLoader(this.mujoco);
-        const { isDouble, isStacking } = await loader.load(robotId, sceneFile, disasterType, supplyLevel, onProgress);
+        const { isDouble, isStacking } = await loader.load(robotId, sceneFile, disasterType, onProgress);
 
         try {
             this.mjModel = this.mujoco.MjModel.loadFromXML(`/working/${sceneFile}`);
@@ -118,15 +118,15 @@ export class MujocoSim {
         if (!this.mjModel || !this.mjData) return;
         
         // Set a more dynamic "mid-action" pose for the Franka Panda
-        // Reaching slightly towards the sorting zones
+        // Upright neutral pose so the arm starts pointed upward over the center workspace
         const activePose = [
-            0.5,    // joint 1
-            0.2,    // joint 2
+            0.0,    // joint 1
+            -0.785, // joint 2
             0.0,    // joint 3
-            -1.8,   // joint 4
+            -2.356, // joint 4
             0.0,    // joint 5
-            2.0,    // joint 6
-            0.8,    // joint 7
+            1.571,  // joint 6
+            0.785,  // joint 7
             0.04,   // gripper 1
             0.04    // gripper 2
         ];

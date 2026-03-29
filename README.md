@@ -10,7 +10,7 @@ Aegis is an autonomous disaster-response workforce built as a system of agents, 
 - `Intel` is the enrichment worker. It adds ReliefWeb humanitarian context and USGS flood observations through the A2A workflow.
 - `Triage` is the prioritization worker. It ranks zones and selects the mission target.
 - `Assembly` is the planning worker. It designs specialized kits for the chosen mission.
-- `Logistics` is the inventory-and-sequencing worker. It reserves stock and prepares robotic pick plans.
+- `Logistics` is the sequencing worker. It condenses a kit into a compact robotic pick plan.
 - `Robotics` is the assembly execution worker. It assigns an available arm and runs the physical kit build workflow.
 - `Delivery` is the field transport worker. It chooses a route and transport mode using current weather risk.
 - `Action` is the outward operations worker. It exports incident packets and can dispatch partner webhooks for real-world handoff.
@@ -28,7 +28,6 @@ Aegis models independently deployable worker lanes even when running in one proc
 - `robotics-worker`
 - `delivery-worker`
 - `action-worker`
-- `inventory-worker`
 
 These boundaries make the A2A workflow explicit and provide a clean path to splitting the system into separate services later.
 
@@ -43,8 +42,6 @@ After delivery arrives, Aegis does not stop at analysis:
 ## Runtime APIs
 
 - `GET /api/health` returns service health.
-- `GET /api/inventory/stock` returns current stock levels.
-- `POST /api/inventory/supply-level` changes the simulated supply tier.
 - `POST /api/missions/start` starts a new mission.
 - `GET /api/system/queues` returns the active worker queue snapshot.
 

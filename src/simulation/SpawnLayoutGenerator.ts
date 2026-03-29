@@ -4,7 +4,7 @@
  */
 
 import { CRISIS_SPAWN_ZONES, DisasterType, DISASTER_PRESETS, SpawnZone } from './CrisisSpawnZones';
-import { allItems } from '../assets/items';
+import { allItems, getItemsByKeyword, getItemByName } from '../assets/items';
 
 export interface SpawnedItem {
     id: number;
@@ -17,75 +17,67 @@ export interface SpawnedItem {
     xml: (i: number, x: number, y: number, z: number, rotation: number) => string;
 }
 
+export const WORKSPACE_SHELF_SLOTS = [
+    // Left shelf outer row
+    { x: -0.68, y: -0.54, z: 0.32, rot: Math.PI / 2 },
+    { x: -0.68, y: -0.38, z: 0.32, rot: Math.PI / 2 },
+    { x: -0.68, y: -0.22, z: 0.32, rot: Math.PI / 2 },
+    { x: -0.68, y: -0.06, z: 0.32, rot: Math.PI / 2 },
+    { x: -0.68, y: 0.10, z: 0.32, rot: Math.PI / 2 },
+    { x: -0.68, y: 0.26, z: 0.32, rot: Math.PI / 2 },
+
+    // Left shelf inner row
+    { x: -0.52, y: -0.50, z: 0.32, rot: Math.PI / 2 },
+    { x: -0.52, y: -0.32, z: 0.32, rot: Math.PI / 2 },
+    { x: -0.52, y: -0.14, z: 0.32, rot: Math.PI / 2 },
+    { x: -0.52, y: 0.04, z: 0.32, rot: Math.PI / 2 },
+    { x: -0.52, y: 0.22, z: 0.32, rot: Math.PI / 2 },
+
+    // Back shelf row
+    { x: -0.54, y: -0.68, z: 0.32, rot: Math.PI },
+    { x: -0.38, y: -0.68, z: 0.32, rot: Math.PI },
+    { x: -0.22, y: -0.68, z: 0.32, rot: Math.PI },
+    { x: -0.06, y: -0.68, z: 0.32, rot: Math.PI },
+    { x: 0.10, y: -0.68, z: 0.32, rot: Math.PI },
+    { x: 0.26, y: -0.68, z: 0.32, rot: Math.PI },
+    { x: 0.42, y: -0.68, z: 0.32, rot: Math.PI },
+    { x: 0.58, y: -0.68, z: 0.32, rot: Math.PI },
+
+    // Right shelf inner row
+    { x: 0.52, y: -0.50, z: 0.32, rot: Math.PI / 2 },
+    { x: 0.52, y: -0.32, z: 0.32, rot: Math.PI / 2 },
+    { x: 0.52, y: -0.14, z: 0.32, rot: Math.PI / 2 },
+    { x: 0.52, y: 0.04, z: 0.32, rot: Math.PI / 2 },
+    { x: 0.52, y: 0.22, z: 0.32, rot: Math.PI / 2 },
+
+    // Right shelf outer row
+    { x: 0.68, y: -0.54, z: 0.32, rot: Math.PI / 2 },
+    { x: 0.68, y: -0.38, z: 0.32, rot: Math.PI / 2 },
+    { x: 0.68, y: -0.22, z: 0.32, rot: Math.PI / 2 },
+    { x: 0.68, y: -0.06, z: 0.32, rot: Math.PI / 2 },
+    { x: 0.68, y: 0.10, z: 0.32, rot: Math.PI / 2 },
+    { x: 0.68, y: 0.26, z: 0.32, rot: Math.PI / 2 }
+] as const;
+
 export class SpawnLayoutGenerator {
+    private static readonly LARGE_ITEM_NAMES = new Set(['shovel', 'safety_boots']);
+
     /**
      * Generates a list of items with randomized positions and rotations.
      * Places items on racks and pallets in a warehouse layout.
      */
-    static generate(disasterType: DisasterType = 'flood', supplyLevel: 'low' | 'medium' | 'high' = 'high'): SpawnedItem[] {
+    static generate(disasterType: DisasterType = 'flood'): SpawnedItem[] {
         const spawnedItems: SpawnedItem[] = [];
-        let itemId = 0;
+        const slots = WORKSPACE_SHELF_SLOTS;
+        const disasterRelevant = getItemsByKeyword(disasterType)
+            .filter(item => !this.LARGE_ITEM_NAMES.has(item.name));
+        const remainingItems = allItems.filter(
+            item => !this.LARGE_ITEM_NAMES.has(item.name) && !disasterRelevant.some(candidate => candidate.name === item.name)
+        );
+        const itemTemplates = [...disasterRelevant, ...remainingItems];
+        const itemsToSpawn = itemTemplates.flatMap(item => [item, item]).slice(0, slots.length);
 
-        // 1. Define Spawn Slots
-        const slots: { x: number, y: number, z: number, rot: number }[] = [];
-
-        const shelfZ = 0.32; // Matches conveyor belt height
-        
-        // Left Segment Slots (3 rows now due to increased width)
-        for (let y = -0.7; y <= 0.3; y += 0.15) {
-            for (let x = -0.75; x <= -0.55; x += 0.1) {
-                slots.push({ x: x, y: y, z: shelfZ, rot: 0 });
-            }
-        }
-        
-        // Right Segment Slots (3 rows)
-        for (let y = -0.7; y <= 0.3; y += 0.15) {
-            for (let x = 0.55; x <= 0.75; x += 0.1) {
-                slots.push({ x: x, y: y, z: shelfZ, rot: 0 });
-            }
-        }
-        
-        // Back Segment Slots (3 rows)
-        for (let x = -0.7; x <= 0.7; x += 0.15) {
-            for (let y = -0.75; y <= -0.55; y += 0.1) {
-                slots.push({ x: x, y: y, z: shelfZ, rot: Math.PI / 2 });
-            }
-        }
-
-        // 2. Distribute items into slots
-        // Ensure requested supply levels
-        const itemsToSpawn: typeof allItems = [];
-        
-        allItems.forEach(item => {
-            if (supplyLevel === 'high') {
-                // High: 3 of each
-                itemsToSpawn.push(item, item, item);
-            } else if (supplyLevel === 'medium') {
-                // Medium: 1 or 2 of each (randomly)
-                const count = Math.random() > 0.5 ? 2 : 1;
-                for (let j = 0; j < count; j++) itemsToSpawn.push(item);
-            } else {
-                // Low: some missing (20% chance), most have 1
-                if (Math.random() > 0.2) {
-                    itemsToSpawn.push(item);
-                }
-            }
-        });
-
-        // Fill the rest with random items if we have more slots and it's high supply
-        if (supplyLevel === 'high') {
-            while (itemsToSpawn.length < slots.length) {
-                const randomItem = allItems[Math.floor(Math.random() * allItems.length)];
-                itemsToSpawn.push(randomItem);
-            }
-        }
-
-        // Sort by category for better organization
-        itemsToSpawn.sort((a, b) => a.category.localeCompare(b.category));
-
-        const numToSpawn = Math.min(itemsToSpawn.length, slots.length);
-
-        for (let i = 0; i < numToSpawn; i++) {
+        for (let i = 0; i < slots.length; i++) {
             const itemTemplate = itemsToSpawn[i];
             const slot = slots[i];
 
@@ -119,7 +111,7 @@ export class SpawnLayoutGenerator {
             };
 
             spawnedItems.push({
-                id: itemId++,
+                id: i,
                 name: itemTemplate.name,
                 category: itemTemplate.category,
                 x: slot.x,

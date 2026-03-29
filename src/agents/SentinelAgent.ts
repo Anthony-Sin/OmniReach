@@ -18,7 +18,7 @@ export class SentinelAgent {
    * Implements deterministic ranking based on alertlevel.
    */
   private static normalizeEvents(events: GDACSEvent[]): NormalizedAlert[] {
-    return events.map(e => {
+    return events.map((e, index) => {
       let severity: 'low' | 'medium' | 'high' | 'critical' = 'low';
       
       // Deterministic ranking rules
@@ -36,19 +36,26 @@ export class SentinelAgent {
           severity = 'medium';
       }
 
+      const eventId = Number.isFinite(Number(e.eventid)) ? Number(e.eventid) : 900000 + index;
+      const episodeId = Number.isFinite(Number(e.episodeid)) ? Number(e.episodeid) : eventId;
+      const lat = Number.isFinite(Number(e.lat)) ? Number(e.lat) : 25.2048;
+      const lng = Number.isFinite(Number(e.lon)) ? Number(e.lon) : 55.2708;
+      const name = e.name || e.eventname || `${e.eventtype || 'disaster'} event ${eventId}`;
+      const description = e.description || `Operational alert for ${name}.`;
+
       return {
-        id: `alert-${e.eventid}-${e.episodeid}`,
-        eventid: e.eventid,
-        episodeid: e.episodeid,
-        type: e.eventtype,
-        name: e.name,
-        country: e.country,
-        lat: e.lat,
-        lng: e.lon,
-        alertLevel: e.alertlevel,
+        id: `alert-${eventId}-${episodeId}`,
+        eventid: eventId,
+        episodeid: episodeId,
+        type: e.eventtype || 'flood',
+        name,
+        country: e.country || 'Unknown',
+        lat,
+        lng,
+        alertLevel: e.alertlevel || 'green',
         severity,
-        description: e.description,
-        timestamp: e.fromdate
+        description,
+        timestamp: e.fromdate || new Date().toISOString()
       };
     });
   }

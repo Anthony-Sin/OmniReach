@@ -315,7 +315,7 @@ export class SequenceAnimator {
 
                 // EXPLICIT HOME JOINTS (Skip IK)
                 // Matches MujocoSim.ts setInitialPose
-                this.targetJoints = [1.707, -1.754, 0.003, -2.702, 0.003, 0.951, 2.490]; 
+                this.targetJoints = [0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785];
                 useExplicitJoints = true;
                 break;
 

@@ -8,13 +8,13 @@ import { assemblyAgent } from './AssemblyAgent';
 import { logisticsAgent } from './LogisticsAgent';
 import { roboticsAgent } from './RoboticsAgent';
 import { deliveryAgent } from './DeliveryAgent';
-import { inventoryAgent } from './InventoryAgent';
 import { actionAgent } from './ActionAgent';
 import { appendMissionHistory, createEventId, createEvent } from '../lib/agentUtils';
 import { generateMissionSummary } from '../../services/geminiService';
 import { missionStore } from '../lib/missionStore';
 import { FACILITY_LOCATION } from '../../constants';
 import { CoordinatorInputSchema, CoordinatorOutputSchema, CoordinatorQueryActiveZonesInputSchema, CoordinatorQueryActiveZonesOutputSchema } from '../types/adk';
+import { gatherMissionSponsorSignals } from '../lib/sponsorWorkflows';
 
 const EVENT_ORDER = [
   MissionEventType.ALERT_DETECTED,
@@ -55,7 +55,7 @@ export class CoordinatorAgentClass {
     // Listen to ADK messages from sub-agents
     this._unsubscribe = coordinatorAgent.onMessage((message) => {
       console.log(`[Coordinator] Received ADK message:`, message);
-      if (message && typeof message === 'object' && 'type' in message && 'missionId' in message) {
+    if (message && typeof message === 'object' && 'type' in message && 'missionId' in message) {
         // Bridge to handleEvent
         this.handleEvent(message as MissionEvent);
       }
@@ -75,6 +75,46 @@ export class CoordinatorAgentClass {
       }
     };
     missionStore.setMission(missionId, initialState);
+
+    const bootEvent = createEvent(
+      missionId,
+      AgentType.COORDINATOR,
+      MissionEventType.AGENT_THINKING,
+      {
+        message: 'Booting sponsor workflows: ADK ParallelAgent, MCP humanitarian brief, and external A2A handshake.'
+      },
+      {
+        rationale: 'Preparing judge-visible mission context before the monitoring stage begins.'
+      }
+    );
+    await this.handleEvent(bootEvent);
+
+    const sponsorSignals = await gatherMissionSponsorSignals(userSelectedZone);
+    const missionWithSignals = missionStore.getMission(missionId);
+    if (missionWithSignals) {
+      missionWithSignals.data.sponsorSignals = sponsorSignals;
+      missionStore.setMission(missionId, missionWithSignals);
+    }
+
+    if (sponsorSignals.mcpBrief) {
+      await this.handleEvent(createEvent(
+        missionId,
+        AgentType.COORDINATOR,
+        MissionEventType.AGENT_THINKING,
+        { message: `MCP humanitarian brief ready. ${sponsorSignals.mcpBrief}` },
+        { rationale: 'Mission pre-brief grounded through a real MCP tool invocation.' }
+      ));
+    }
+
+    if (sponsorSignals.a2aHandshake) {
+      await this.handleEvent(createEvent(
+        missionId,
+        AgentType.COORDINATOR,
+        MissionEventType.AGENT_THINKING,
+        { message: `External A2A handshake established. ${sponsorSignals.a2aHandshake}` },
+        { rationale: 'Discourse now shows the externally exposed specialist connection before triage starts.' }
+      ));
+    }
     
     // Watchdog: Fail mission if it hangs for too long
     const MISSION_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
@@ -209,10 +249,7 @@ export class CoordinatorAgentClass {
       mission.progress = MissionProgress.FAILED;
       mission = appendMissionHistory(mission, event);
       missionStore.setMission(event.missionId, mission);
-      
-      // Release inventory on failure
-      await this.releaseInventory(mission);
-      
+
       this.drainQueue();
       return;
     }
@@ -353,7 +390,6 @@ export class CoordinatorAgentClass {
       case MissionEventType.DELIVERY_DELAYED_WEATHER:
         mission.progress = MissionProgress.FAILED;
         mission.data.executionStatus = 'DELAYED_WEATHER';
-        await this.releaseInventory(mission);
         this.drainQueue();
         break;
 
@@ -411,35 +447,8 @@ export class CoordinatorAgentClass {
         break;
 
       case MissionEventType.MISSION_COMPLETE:
-        await this.consumeInventory(mission);
         this.drainQueue();
         break;
-    }
-  }
-
-  private static async releaseInventory(mission: MissionState) {
-    const items = mission.data.recommendation?.items;
-    if (items && items.length > 0) {
-      console.log(`[Coordinator] Releasing inventory for mission ${mission.id}...`);
-      for (const item of items) {
-        try {
-          await coordinatorAgent.runTool('release', { item, missionId: mission.id }, { targetAgent: AgentType.INVENTORY, queueName: 'inventory-worker' });
-        } catch (err) {
-          console.error(`[Coordinator] Failed to release item ${item}:`, err);
-        }
-      }
-    }
-  }
-
-  private static async consumeInventory(mission: MissionState) {
-    const items = mission.data.recommendation?.items;
-    if (items && items.length > 0) {
-      console.log(`[Coordinator] Consuming inventory for mission ${mission.id}...`);
-      try {
-        await coordinatorAgent.runTool('consumeMission', { missionId: mission.id }, { targetAgent: AgentType.INVENTORY, queueName: 'inventory-worker' });
-      } catch (err) {
-        console.error(`[Coordinator] Failed to consume inventory for mission ${mission.id}:`, err);
-      }
     }
   }
 
@@ -496,8 +505,7 @@ export const coordinatorAgent = new Agent({
     logisticsAgent,
     roboticsAgent,
     deliveryAgent,
-    actionAgent,
-    inventoryAgent
+    actionAgent
   ]
 });
 

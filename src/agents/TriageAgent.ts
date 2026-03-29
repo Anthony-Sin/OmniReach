@@ -5,6 +5,7 @@ import { createEvent } from '../lib/agentUtils';
 import { MissionEventType, NormalizedAlert, MissionState, ZonePrioritizedPayloadSchema, KitSpecialization, AgentType } from '../types/mission';
 import { FACILITY_LOCATION } from '../../constants';
 import { TriageInputSchema, TriageOutputSchema } from '../types/adk';
+import { enrichAlertsWithParallelAgent } from '../lib/sponsorWorkflows';
 
 function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
   const R = 6371;
@@ -55,9 +56,22 @@ function normalizeZone(alert: any) {
   return {
     ...alert,
     id: alert.id ?? `gdacs-${alert.eventid ?? alert.name ?? 'zone'}`,
+    eventid: Number.isFinite(Number(alert.eventid)) ? Number(alert.eventid) : -1,
+    name: alert.name ?? alert.eventname ?? 'Unspecified disaster zone',
+    country: alert.country ?? 'Unknown',
+    lat: Number.isFinite(Number(alert.lat)) ? Number(alert.lat) : FACILITY_LOCATION.lat,
+    lng: Number.isFinite(Number(alert.lng ?? alert.lon)) ? Number(alert.lng ?? alert.lon) : FACILITY_LOCATION.lng,
+    distance: Number.isFinite(Number(alert.distance)) ? Number(alert.distance) : haversineKm(
+      Number.isFinite(Number(alert.lat)) ? Number(alert.lat) : FACILITY_LOCATION.lat,
+      Number.isFinite(Number(alert.lng ?? alert.lon)) ? Number(alert.lng ?? alert.lon) : FACILITY_LOCATION.lng,
+      FACILITY_LOCATION.lat,
+      FACILITY_LOCATION.lng
+    ),
+    triageScore: Number.isFinite(Number(alert.triageScore)) ? Number(alert.triageScore) : 0,
     type: typeMap[rawType] ?? 'flood',
     severity: ['low', 'medium', 'high', 'critical', 'nominal'].includes(rawSeverity) ? rawSeverity : 'medium',
-    alertLevel: alert.alertLevel ?? alert.alertlevel ?? 'green'
+    alertLevel: alert.alertLevel ?? alert.alertlevel ?? 'green',
+    reasoning: alert.reasoning ?? alert.description ?? 'Deterministic triage fallback selected this target based on severity and proximity.'
   };
 }
 
@@ -116,11 +130,15 @@ export class TriageAgent {
       });
 
       try {
-        const enrichment = await context.agent.runTool(
-          'enrichAlerts',
-          { missionId, alerts: scoredAlerts.slice(0, 5) },
-          { targetAgent: AgentType.INTEL, queueName: 'intel-worker' }
-        );
+        context.agent.sendMessage(AgentType.COORDINATOR, createEvent(
+          missionId,
+          AgentType.TRIAGE,
+          MissionEventType.AGENT_THINKING,
+          { message: 'Launching ADK ParallelAgent for multi-source intel enrichment.' },
+          { rationale: 'TriageIntelParallelWorkflow is fanning out ReliefWeb and flood intelligence in parallel.' }
+        ));
+
+        const enrichment = await enrichAlertsWithParallelAgent(scoredAlerts.slice(0, 5));
 
         const enrichedByEventId = new Map<number, any>(
           (enrichment?.enrichedAlerts ?? []).map((alert: any) => [alert.eventid, alert])
@@ -135,7 +153,8 @@ export class TriageAgent {
           return {
             ...alert,
             ...enriched,
-            triageScore: alert.triageScore + reliefBoost + floodBoost
+            triageScore: alert.triageScore + reliefBoost + floodBoost,
+            parallelWorkflow: enrichment.workflow
           };
         });
       } catch (e) {
@@ -143,10 +162,12 @@ export class TriageAgent {
       }
 
       // Sort by score
-      const sorted = scoredAlerts.sort((a, b) => b.triageScore - a.triageScore);
+      const sorted = scoredAlerts
+        .map(normalizeZone)
+        .sort((a, b) => (b.triageScore ?? 0) - (a.triageScore ?? 0));
       
       // 2. AI-Enhanced Reasoning
-      let reasoning = `Prioritized ${sorted[0].name} based on ${sorted[0].severity} severity and proximity.`;
+      let reasoning = `Prioritized ${sorted[0]?.name ?? 'target zone'} based on ${sorted[0]?.severity ?? 'medium'} severity and proximity.`;
       let ranked = sorted;
 
       // Gemini ranking with retry and validation (handled in geminiService)
@@ -164,13 +185,20 @@ export class TriageAgent {
         }
       }
 
-      ranked = ranked.map(normalizeZone);
+      ranked = ranked.map(normalizeZone).filter(zone => Boolean(zone.name));
 
       const selectedZone: any = ranked[0];
+      if (!selectedZone) {
+        throw new Error('No valid zone remained after triage normalization.');
+      }
+
+      const priorityScore = Number.isFinite(Number(selectedZone.triageScore))
+        ? Math.min(Number(selectedZone.triageScore) / 300, 1)
+        : 0.35;
       const payload = { 
         zone: selectedZone,
         ranked, // Full list for UI
-        priorityScore: Math.min((selectedZone.triageScore ?? 0) / 300, 1), // Normalized 0-1
+        priorityScore,
         reason: reasoning,
         recommendedMissionMode: selectedZone.severity === 'critical' ? 'EMERGENCY' : 'STANDARD' as const,
         constraints: [

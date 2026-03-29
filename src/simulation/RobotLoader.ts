@@ -24,7 +24,7 @@ export class RobotLoader {
      * Main entry point. Downloads the main scene XML and recursively finds/downloads all included files.
      * @param onProgress Optional callback to report loading progress string.
      */
-    async load(robotId: string, sceneFile: string, disasterType: DisasterType = 'flood', supplyLevel: 'low' | 'medium' | 'high' = 'high', onProgress?: (msg: string) => void): Promise<{ isDouble: boolean, isStacking: boolean }> {
+    async load(robotId: string, sceneFile: string, disasterType: DisasterType = 'flood', onProgress?: (msg: string) => void): Promise<{ isDouble: boolean, isStacking: boolean }> {
         // 1. Clean up the virtual filesystem from previous runs
         try { this.mujoco.FS.unmount('/working'); } catch (e) { /* ignore */ }
         try { this.mujoco.FS.mkdir('/working'); } catch (e) { /* ignore */ }
@@ -79,7 +79,7 @@ export class RobotLoader {
                 // If it's an XML, we might need to patch it and scan it for more dependencies
                 if (fname.endsWith('.xml')) {
                     let text = await res.text();
-                    text = this.patchSingleRobot(fname, sceneFile, isStacking, text, disasterType, supplyLevel);
+                    text = this.patchSingleRobot(fname, sceneFile, isStacking, text, disasterType);
                     
                     // Write text file to virtual FS
                     this.mujoco.FS.writeFile(`/working/${fname}`, text);
@@ -101,7 +101,7 @@ export class RobotLoader {
     }
 
     // Modifies the standard XMLs to add our specific demo objects (cubes, trays)
-    private patchSingleRobot(fname: string, sceneFile: string, isStacking: boolean, text: string, disasterType: DisasterType, supplyLevel: 'low' | 'medium' | 'high'): string {
+    private patchSingleRobot(fname: string, sceneFile: string, isStacking: boolean, text: string, disasterType: DisasterType): string {
         if (fname === sceneFile) {
             let assetInjection = '';
             let bodyInjection = '';
@@ -137,7 +137,7 @@ export class RobotLoader {
             bodyInjection += SpawnLayoutGenerator.generateEnvironmentDecorations();
             
             // Inject survival items using the new crisis layout generator
-            const spawnedItems = SpawnLayoutGenerator.generate(disasterType, supplyLevel);
+            const spawnedItems = SpawnLayoutGenerator.generate(disasterType);
             spawnedItems.forEach((item, index) => {
                 bodyInjection += item.xml(index, item.x, item.y, item.z, item.rotation);
             });

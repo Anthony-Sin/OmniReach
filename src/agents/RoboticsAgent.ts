@@ -3,6 +3,9 @@ import { Agent, Tool } from '../lib/adk';
 import { createEvent } from '../lib/agentUtils';
 import { MissionEventType, PickSequenceCreatedPayload, PickStep, ArmExecutionStartedPayloadSchema, ArmExecutionCompletedPayloadSchema, AgentType } from '../types/mission';
 import { RoboticsInputSchema, RoboticsOutputSchema } from '../types/adk';
+import { missionStore } from '../lib/missionStore';
+import { verifyBoxWithLoopAgent } from '../lib/sponsorWorkflows';
+import { analyzeRoboticsWorkspace } from '../../services/geminiService';
 
 interface RobotArm {
   armId: string;
@@ -147,9 +150,21 @@ export class RoboticsAgent {
     }
   }
 
-  private static complete(missionId: string, armId: string, context: any) {
+  private static complete(missionId: string, armId: string, context: any, verification?: any) {
     const arm = this.armPool.get(armId);
     if (!arm) return;
+
+    const mission = missionStore.getMission(missionId);
+    if (mission && verification) {
+      mission.data.boxVerification = {
+        verified: verification.verified,
+        summary: verification.summary,
+        attempts: verification.attempts.length,
+        detectedItems: verification.detectedItems,
+        lastCheckedAt: Date.now()
+      };
+      missionStore.setMission(missionId, mission);
+    }
 
     const completionPayload = { 
       success: true,
@@ -167,7 +182,11 @@ export class RoboticsAgent {
       AgentType.ROBOTICS,
       MissionEventType.ARM_EXECUTION_COMPLETED,
       completionPayload,
-      { rationale: `Robotic arm ${armId} has finished all pick-and-place operations.` }
+      {
+        rationale: verification?.summary
+          ? `Robotic arm ${armId} finished all pick-and-place operations. ${verification.summary}`
+          : `Robotic arm ${armId} has finished all pick-and-place operations.`
+      }
     );
     context.agent.sendMessage(AgentType.COORDINATOR, completeEvent);
 
@@ -251,11 +270,61 @@ export class RoboticsAgent {
     console.log('[RoboticsAgent] Execution stopped and queue cleared.');
   }
 
-  static async handleExternalCompletion(missionId: string, armId: string) {
+  static async handleExternalCompletion(missionId: string, armId: string, snapshots?: { workspaceImage?: string | null; boxImage?: string | null }) {
     console.log(`[RoboticsAgent] External completion received for mission ${missionId} on arm ${armId}`);
     const context = this.missionContexts.get(missionId);
     if (context) {
-      this.complete(missionId, armId, context);
+      const mission = missionStore.getMission(missionId);
+      const expectedItems = mission?.data.recommendation?.items ?? [];
+      const roboticsVision = mission?.data.roboticsVision
+        ?? await analyzeRoboticsWorkspace({
+          workspaceImage: snapshots?.workspaceImage,
+          expectedItems
+        });
+
+      if (mission && !mission.data.roboticsVision) {
+        mission.data.roboticsVision = {
+          ...roboticsVision,
+          lastAnalyzedAt: Date.now()
+        };
+        missionStore.setMission(missionId, mission);
+      }
+
+      if (roboticsVision?.summary) {
+        context.agent.sendMessage(AgentType.COORDINATOR, createEvent(
+          missionId,
+          AgentType.ROBOTICS,
+          MissionEventType.AGENT_THINKING,
+          {
+            message: roboticsVision.summary
+          },
+          {
+            rationale: `${roboticsVision.model} analyzed the top-down robotic workspace once before verification.`
+          }
+        ));
+      }
+
+      const verification = await verifyBoxWithLoopAgent({
+        workspaceImage: snapshots?.workspaceImage,
+        boxImage: snapshots?.boxImage,
+        expectedItems
+      });
+
+      verification.attempts.forEach((attempt: any) => {
+        context.agent.sendMessage(AgentType.COORDINATOR, createEvent(
+          missionId,
+          AgentType.ROBOTICS,
+          MissionEventType.AGENT_THINKING,
+          {
+            message: `LoopAgent iteration ${attempt.iteration}: ${attempt.summary}`
+          },
+          {
+            rationale: `${verification.workflow} evaluated the overhead brown-box camera feed for completed kit presence.`
+          }
+        ));
+      });
+
+      this.complete(missionId, armId, context, verification);
       this.missionContexts.delete(missionId);
     } else {
       console.error(`[RoboticsAgent] Cannot complete mission ${missionId}: context is missing.`);

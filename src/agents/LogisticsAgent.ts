@@ -5,7 +5,6 @@ import { MissionEventType, KitPlanCreatedPayload, PickSequenceCreatedPayloadSche
 import { PickPlanner } from '../lib/pickPlanner';
 import { explainLogisticsSequence } from '../../services/geminiService';
 import { LogisticsInputSchema, LogisticsOutputSchema } from '../types/adk';
-import { inventoryAgent } from './InventoryAgent';
 
 export class LogisticsAgent {
   static async createPickSequence(missionId: string, payload: KitPlanCreatedPayload, context: any) {
@@ -15,64 +14,22 @@ export class LogisticsAgent {
         missionId,
         AgentType.LOGISTICS,
         MissionEventType.AGENT_THINKING,
-        { message: 'Verifying inventory availability (Check-then-Commit)...' },
-        { rationale: 'Validating resource availability before finalizing the logistics plan.' }
+        { message: 'Preparing a two-item robotic pick sequence for the arm workspace...' },
+        { rationale: 'Condensing the kit into a compact robotic sequence that fits the physical scene.' }
       );
       context.agent.sendMessage(AgentType.COORDINATOR, thinkingEvent);
 
-      // 0. Check stock before claiming
-      const stockCheck = await context.agent.runTool('checkStock', { items: payload.items }, { targetAgent: AgentType.INVENTORY, queueName: 'inventory-worker' });
-      const missingItems = stockCheck?.missingItems ?? [];
-      
-      if (!payload.reroutedItems) payload.reroutedItems = [];
-
-      if (missingItems.length > 0) {
-        for (const missingItem of missingItems) {
-          // Logic: If critical, try to reroute. Otherwise, reduce allocation.
-          if (payload.priority === 'critical') {
-            console.log(`[Logistics] Decision: Rerouted to Warehouse_B due to supply shortage of ${missingItem}.`);
-            payload.reroutedItems.push(missingItem);
-            // Simulate rerouting delay
-            await new Promise(resolve => setTimeout(resolve, 1000));
-          } else {
-            console.log(`[Logistics] Decision: Reduced allocation due to supply shortage of ${missingItem}.`);
-          }
-        }
-      }
-
-      // 1. Claim items from InventoryAgent
-      const itemsToClaim = [...payload.items];
-      payload.items = [];
-      if (!payload.missingItems) payload.missingItems = [];
-
-      for (const itemName of itemsToClaim) {
-        try {
-          // ADK: Use InventoryAgent tool via context
-          const result = await context.agent.runTool('claim', { item: itemName, missionId }, { targetAgent: AgentType.INVENTORY, queueName: 'inventory-worker' });
-
-          if (result.success) {
-            payload.items.push(itemName);
-          } else {
-            console.warn(`[Logistics] Item ${itemName} already claimed by ${result.claimedBy}`);
-            payload.missingItems.push(itemName);
-          }
-        } catch (e) {
-          console.error(`[Logistics] Failed to claim item ${itemName}:`, e);
-          payload.missingItems.push(itemName);
-        }
-      }
-
-      // 1. Generate deterministic pick sequence using the planner module
+      // Generate deterministic pick sequence using the planner module.
       const { steps, warnings } = PickPlanner.generateSequence(payload);
       const totalDuration = PickPlanner.calculateTotalDuration(steps);
 
-      // 2. AI Rationale for the sequence (handled in geminiService with retries)
+      // AI rationale for the sequence (handled in geminiService with retries)
       const aiRationale = await explainLogisticsSequence(payload.kitType, steps);
 
-      // 3. Safety notes based on kit priority
+      // Safety notes based on kit priority
       const safetyNotes = [
         'Check arm clearance',
-        'Verify item weight',
+        'Verify workspace slot alignment',
         payload.priority === 'critical' ? 'EMERGENCY OVERRIDE ENABLED' : 'Standard safety protocols'
       ];
 
@@ -135,6 +92,6 @@ export const logisticsTool = new Tool({
 
 export const logisticsAgent = new Agent({
   name: AgentType.LOGISTICS,
-  description: 'Creates pick sequences and claims inventory.',
+  description: 'Creates compact pick sequences for the robotic arm workspace.',
   tools: [logisticsTool]
 });

@@ -11,7 +11,6 @@ export enum AgentType {
   DELIVERY = 'DELIVERY',
   ACTION = 'ACTION',
   COORDINATOR = 'COORDINATOR',
-  INVENTORY = 'INVENTORY',
 }
 
 export enum MissionProgress {
@@ -326,5 +325,30 @@ export interface MissionState {
     partnerName?: string;
     actionChannels?: string[];
     kitSpecialization?: KitSpecialization;
+    sponsorSignals?: {
+      parallelWorkflow?: string;
+      loopWorkflow?: string;
+      mcpBrief?: string;
+      a2aHandshake?: string;
+    };
+    roboticsVision?: {
+      model: string;
+      summary: string;
+      result: Array<{
+        label: string;
+        confidence?: number;
+        status?: string;
+        source?: number[];
+        box_2d?: [number, number, number, number];
+      }>;
+      lastAnalyzedAt: number;
+    };
+    boxVerification?: {
+      verified: boolean;
+      summary: string;
+      attempts: number;
+      detectedItems?: string[];
+      lastCheckedAt: number;
+    };
   };
 }

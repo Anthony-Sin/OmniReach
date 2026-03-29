@@ -264,6 +264,62 @@ export class RenderSystem {
         return this.renderer.domElement.toDataURL(mimeType, mimeType === 'image/jpeg' ? 0.8 : undefined);
     }
 
+    getTopDownSnapshot(width?: number, height?: number, mimeType = 'image/jpeg'): string {
+        const originalPosition = this.camera.position.clone();
+        const originalQuaternion = this.camera.quaternion.clone();
+        const originalTarget = this.controls.target.clone();
+        const originalUp = this.camera.up.clone();
+
+        const topDownTarget = new THREE.Vector3(0.62, -0.18, 0.3);
+        this.camera.position.set(0.62, -0.18, 2.55);
+        this.camera.up.set(0, 1, 0);
+        this.camera.lookAt(topDownTarget);
+        this.controls.target.copy(topDownTarget);
+        this.camera.updateMatrixWorld();
+        this.camera.updateProjectionMatrix();
+        this.renderer.render(this.scene, this.camera);
+
+        const snapshot = this.getCanvasSnapshot(width, height, mimeType);
+
+        this.camera.position.copy(originalPosition);
+        this.camera.quaternion.copy(originalQuaternion);
+        this.camera.up.copy(originalUp);
+        this.controls.target.copy(originalTarget);
+        this.camera.updateMatrixWorld();
+        this.camera.updateProjectionMatrix();
+        this.renderer.render(this.scene, this.camera);
+
+        return snapshot;
+    }
+
+    getBoxVerificationSnapshot(width?: number, height?: number, mimeType = 'image/jpeg'): string {
+        const originalPosition = this.camera.position.clone();
+        const originalQuaternion = this.camera.quaternion.clone();
+        const originalTarget = this.controls.target.clone();
+        const originalUp = this.camera.up.clone();
+
+        const boxTarget = new THREE.Vector3(0.12, 0.62, 0.36);
+        this.camera.position.set(0.12, 0.62, 1.75);
+        this.camera.up.set(0, 1, 0);
+        this.camera.lookAt(boxTarget);
+        this.controls.target.copy(boxTarget);
+        this.camera.updateMatrixWorld();
+        this.camera.updateProjectionMatrix();
+        this.renderer.render(this.scene, this.camera);
+
+        const snapshot = this.getCanvasSnapshot(width, height, mimeType);
+
+        this.camera.position.copy(originalPosition);
+        this.camera.quaternion.copy(originalQuaternion);
+        this.camera.up.copy(originalUp);
+        this.controls.target.copy(originalTarget);
+        this.camera.updateMatrixWorld();
+        this.camera.updateProjectionMatrix();
+        this.renderer.render(this.scene, this.camera);
+
+        return snapshot;
+    }
+
     project2DTo3D(x: number, y: number, cameraPos: THREE.Vector3, lookAt: THREE.Vector3): { point: THREE.Vector3, bodyId: number } | null {
         const virtCam = this.camera.clone();
         virtCam.position.copy(cameraPos);

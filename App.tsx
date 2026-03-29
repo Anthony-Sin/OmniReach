@@ -24,11 +24,11 @@ import {
   Navigation, 
   Package, 
   Radio, 
-  Settings, 
   ShieldAlert, 
   Zap,
   ChevronRight,
   ChevronLeft,
+  ChevronDown,
   Search,
   MousePointer2,
   Plus,
@@ -70,6 +70,26 @@ interface VisionDetection {
   box_2d: [number, number, number, number];
   source: number[];
   status: 'ACTIVE' | 'QUEUED';
+}
+
+interface ApiUsageSnapshot {
+  missionStarts: number;
+  mapLoads: number;
+  gemini: {
+    totalCalls: number;
+    successfulCalls: number;
+    failedCalls: number;
+    blockedCalls: number;
+    inputTokens: number;
+    outputTokens: number;
+    estimatedCostUsd: number;
+    budgetUsd: number;
+    maxCalls: number;
+    maxInputTokens: number;
+    maxOutputTokens: number;
+    remainingUsd: number;
+    lastBlockedReason: string | null;
+  };
 }
 
 /**
@@ -159,6 +179,41 @@ function buildVisionDetections(pickSequence?: any[], fallbackItems?: string[]): 
   });
 }
 
+const ROBOTICS_TOP_DOWN_TARGET = [0.62, -0.18, 0.3];
+
+function buildZoneImportanceLines(zone: DisasterZone | null, mission: MissionState | null) {
+  if (!zone) return [];
+
+  const lines = [
+    zone.description || `${zone.name} is currently the most relevant operational area in the workspace.`,
+    zone.type === 'facility'
+      ? 'This facility is the active launch point for robotics, logistics, and delivery coordination.'
+      : `${zone.name} is being prioritized because it currently represents one of the strongest need signals in the monitored disaster set.`
+  ];
+
+  if ((zone as any).alertLevel) {
+    lines.push(`Alert level is ${(zone as any).alertLevel}, which increases coordination urgency for this target.`);
+  }
+
+  if ((zone as any).intelSummary) {
+    lines.push((zone as any).intelSummary);
+  }
+
+  if ((zone as any).reliefWebCount) {
+    lines.push(`ReliefWeb context count: ${(zone as any).reliefWebCount} supporting humanitarian reports.`);
+  }
+
+  if ((zone as any).floodGaugeCount) {
+    lines.push(`USGS flood gauges in range: ${(zone as any).floodGaugeCount}.`);
+  }
+
+  if (mission?.data.recommendation?.reasoning && mission.data.selectedZone?.id === zone.id) {
+    lines.push(mission.data.recommendation.reasoning);
+  }
+
+  return Array.from(new Set(lines.filter(Boolean))).slice(0, 4);
+}
+
 export function App() {
   // Aegis UI State
   const [selectedZone, setSelectedZone] = useState<DisasterZone | null>(null);
@@ -171,43 +226,29 @@ export function App() {
   const [missionSummary, setMissionSummary] = useState<MissionCompletePayload | null>(null);
   const [dronePositions, setDronePositions] = useState<Map<string, { lat: number; lng: number; percent: number }>>(new Map());
   const [viewMode, setViewMode] = useState<'logs' | 'graph'>('logs');
-  const [supplyLevel, setSupplyLevel] = useState<'low' | 'medium' | 'high'>('high');
-  const [stock, setStock] = useState<any[]>([]);
+  const [isFlowOverlayOpen, setIsFlowOverlayOpen] = useState(false);
+  const [usageStats, setUsageStats] = useState<ApiUsageSnapshot | null>(null);
+  const [isMissionStarting, setIsMissionStarting] = useState(false);
+  const [expandedDebugPanels, setExpandedDebugPanels] = useState({
+    vision: false,
+    operations: false
+  });
+  const [isZonePanelDismissed, setIsZonePanelDismissed] = useState(false);
   const [roboticsSnapshot, setRoboticsSnapshot] = useState<string | null>(null);
-
-  const fetchStock = async () => {
-    try {
-      const response = await fetch('/api/inventory/stock');
-      if (response.ok) {
-        const data = await response.json();
-        setStock(data);
-      }
-    } catch (error) {
-      console.error('Failed to fetch stock:', error);
-    }
-  };
-
-  const updateSupplyLevel = async (level: 'low' | 'medium' | 'high') => {
-    try {
-      const response = await fetch('/api/inventory/supply-level', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ level })
-      });
-      if (response.ok) {
-        setSupplyLevel(level);
-        fetchStock();
-      }
-    } catch (error) {
-      console.error('Failed to update supply level:', error);
-    }
-  };
+  const [topDownSnapshot, setTopDownSnapshot] = useState<string | null>(null);
+  const [boxVerificationSnapshot, setBoxVerificationSnapshot] = useState<string | null>(null);
+  const [appSceneReady, setAppSceneReady] = useState(false);
 
   // MuJoCo State
   const containerRef = useRef<HTMLDivElement>(null); 
   const simRef = useRef<MujocoSim | null>(null);      
   const isMounted = useRef(true);                     
   const mujocoModuleRef = useRef<MujocoModule | null>(null);          
+  const discourseScrollRef = useRef<HTMLDivElement>(null);
+  const panelScrollRef = useRef<HTMLDivElement>(null);
+  const shouldFollowDiscourseRef = useRef(true);
+  const shouldFollowPanelRef = useRef(true);
+  const mapLoadReportedRef = useRef(false);
 
   const [simLoading, setSimLoading] = useState(false);
   const [simStatus, setSimStatus] = useState("");
@@ -220,48 +261,99 @@ export function App() {
   const [isRobotFullscreen, setIsRobotFullscreen] = useState(false);
   const [simBootNonce, setSimBootNonce] = useState(0);
 
-  const selectedZoneKey = selectedZone
-    ? `${selectedZone.id}:${selectedZone.type}:${selectedZone.lat}:${selectedZone.lng}`
-    : null;
-
-  const openRobotFullscreen = () => {
-    if (selectedZone?.type === 'facility') {
-      setIsRobotFullscreen(true);
-    }
-  };
-
   const retrySimulationBoot = () => {
     setSimError(null);
+    setAppSceneReady(false);
     setSimBootNonce(prev => prev + 1);
   };
 
   const hasMissionActivity = Boolean(currentMissionId || currentMission || missionSummary || missionEvents.length);
+  const isMissionActive = Boolean(currentMission && currentMission.progress !== MissionProgress.COMPLETED && currentMission.progress !== MissionProgress.FAILED);
+  const showMissionFocusCard = !hasMissionActivity;
   const latestThinkingEvents = useMemo(
     () => missionEvents.filter(event => event.type === MissionEventType.AGENT_THINKING || event.type === MissionEventType.AGENT_WAITING).slice(0, 4),
     [missionEvents]
   );
+  const latestFailureEvent = useMemo(
+    () => missionEvents.find(event => event.type === MissionEventType.MISSION_FAILED || event.status === 'ERROR') ?? null,
+    [missionEvents]
+  );
+  const missionDisplayState = useMemo(() => {
+    if (currentMission?.progress === MissionProgress.FAILED || latestFailureEvent) {
+      return {
+        label: 'Failed',
+        tone: 'failure' as const,
+        detail: latestFailureEvent
+          ? ((latestFailureEvent.payload as any)?.reason ?? latestFailureEvent.rationale ?? 'The mission encountered an error state.')
+          : 'The mission encountered an error state.'
+      };
+    }
+
+    if (currentMission?.progress === MissionProgress.COMPLETED) {
+      return {
+        label: 'Completed',
+        tone: 'success' as const,
+        detail: missionSummary?.summary ?? 'Mission completed successfully.'
+      };
+    }
+
+    return {
+      label: currentMission?.progress ?? 'Launching',
+      tone: 'active' as const,
+      detail: latestThinkingEvents[0]
+        ? ((latestThinkingEvents[0].payload as any)?.message ?? latestThinkingEvents[0].rationale)
+        : (currentMission?.data.selectedZone?.description ?? 'Agents are now updating mission status in real time.')
+    };
+  }, [currentMission?.progress, currentMission?.data.selectedZone?.description, latestFailureEvent, latestThinkingEvents, missionSummary?.summary]);
   const roboticsDetections = useMemo(
     () => buildVisionDetections(currentMission?.data.pickSequence, currentMission?.data.recommendation?.items),
     [currentMission?.data.pickSequence, currentMission?.data.recommendation?.items]
   );
   const roboticsVisionLog = useMemo(
-    () => roboticsDetections.length > 0 ? {
-      model: 'Gemini Robotics-ER 1.5',
-      summary: `${roboticsDetections.length} workspace targets identified for robotic handling.`,
-      result: roboticsDetections.map(detection => ({
-        label: detection.item,
-        confidence: Number(detection.confidence.toFixed(2)),
-        status: detection.status,
-        source: detection.source,
-        box_2d: detection.box_2d
-      }))
-    } : null,
-    [roboticsDetections]
+    () => currentMission?.data.roboticsVision ?? (
+      roboticsDetections.length > 0 ? {
+        model: 'gemini-robotics-er-1.5-preview',
+        summary: `${roboticsDetections.length} workspace targets identified for robotic handling.`,
+        result: roboticsDetections.map(detection => ({
+          label: detection.item,
+          confidence: Number(detection.confidence.toFixed(2)),
+          status: detection.status,
+          source: detection.source,
+          box_2d: detection.box_2d
+        })),
+        lastAnalyzedAt: Date.now()
+      } : null
+    ),
+    [currentMission?.data.roboticsVision, roboticsDetections]
   );
-  const miniMapSteps = useMemo(
-    () => (currentMission?.data.pickSequence ?? []).filter(step => step.action === 'PICK').slice(0, 5),
-    [currentMission?.data.pickSequence]
+  const isGeminiTopDownActive = Boolean(roboticsVisionLog && topDownSnapshot);
+  const panelZone = (currentMission?.data.selectedZone as DisasterZone | undefined) ?? selectedZone;
+  const selectedZoneImportance = useMemo(
+    () => buildZoneImportanceLines(panelZone ?? null, currentMission),
+    [panelZone, currentMission]
   );
+  const rawOperationsSnapshot = useMemo(() => ({
+    sponsorSignals: currentMission?.data.sponsorSignals ?? null,
+    recommendation: currentMission?.data.recommendation ?? null,
+    boxVerification: currentMission?.data.boxVerification ?? null,
+    route: currentMission?.data.route ?? null
+  }), [
+    currentMission?.data.sponsorSignals,
+    currentMission?.data.recommendation,
+    currentMission?.data.boxVerification,
+    currentMission?.data.route
+  ]);
+
+  const loadUsageStats = async () => {
+    try {
+      const response = await fetch('/api/system/usage');
+      if (!response.ok) return;
+      const snapshot = await response.json() as ApiUsageSnapshot;
+      setUsageStats(snapshot);
+    } catch (error) {
+      console.warn('Failed to load API usage snapshot:', error);
+    }
+  };
 
   useEffect(() => {
     const checkGoogle = setInterval(() => {
@@ -272,6 +364,23 @@ export function App() {
     }, 100);
     return () => clearInterval(checkGoogle);
   }, []);
+
+  useEffect(() => {
+    loadUsageStats();
+    const interval = window.setInterval(loadUsageStats, 2500);
+    return () => window.clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    if (!googleReady || mapLoadReportedRef.current) return;
+    mapLoadReportedRef.current = true;
+
+    fetch('/api/system/map-load', { method: 'POST' })
+      .then(() => loadUsageStats())
+      .catch(error => {
+        console.warn('Failed to register map load:', error);
+      });
+  }, [googleReady]);
 
   const syncMissionState = (mission: MissionState) => {
     missionStore.setMission(mission.id, mission);
@@ -332,12 +441,10 @@ export function App() {
 
   // Agent Event System Integration
   useEffect(() => {
-    fetchStock();
     // Subscribe to mission events via WebSocket
     const unsubscribe = subscribeToMissionEvents((event: MissionEvent) => {
       if (event.type === MissionEventType.MISSION_COMPLETE) {
         setMissionSummary(event.payload);
-        fetchStock();
         
         // Remove drone marker after 3 seconds
         setTimeout(() => {
@@ -387,7 +494,13 @@ export function App() {
   }, [currentMissionId]);
 
   const handleStartMission = async () => {
+    if (isMissionStarting || isMissionActive) return;
     setMissionSummary(null);
+    setViewMode('logs');
+    setIsFlowOverlayOpen(false);
+    setCurrentMission(null);
+    setMissionEvents([]);
+    setIsMissionStarting(true);
     try {
       const response = await fetch('/api/missions/start', {
         method: 'POST',
@@ -396,8 +509,12 @@ export function App() {
       });
       const { missionId } = await response.json();
       setCurrentMissionId(missionId);
+      setIsZonePanelDismissed(false);
     } catch (err) {
       console.error('Failed to start mission:', err);
+    } finally {
+      setIsMissionStarting(false);
+      loadUsageStats();
     }
   };
 
@@ -408,6 +525,37 @@ export function App() {
       syncMissionState(mission);
     }
   }, [currentMissionId]);
+
+  useEffect(() => {
+    const container = discourseScrollRef.current;
+    if (!container || !shouldFollowDiscourseRef.current) return;
+    container.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [missionEvents, latestThinkingEvents.length, currentMission?.currentStep, currentMission?.progress]);
+
+  useEffect(() => {
+    const container = panelScrollRef.current;
+    if (!container || !shouldFollowPanelRef.current) return;
+    container.scrollTo({ top: 0, behavior: 'smooth' });
+  }, [currentMission?.currentStep, currentMission?.progress, currentMission?.data.executionStatus, latestThinkingEvents.length, panelZone?.id]);
+
+  const handleDiscourseScroll = () => {
+    const container = discourseScrollRef.current;
+    if (!container) return;
+    shouldFollowDiscourseRef.current = container.scrollTop <= 72;
+  };
+
+  const handlePanelScroll = () => {
+    const container = panelScrollRef.current;
+    if (!container) return;
+    shouldFollowPanelRef.current = container.scrollTop <= 72;
+  };
+
+  const toggleDebugPanel = (panel: 'vision' | 'operations') => {
+    setExpandedDebugPanels(prev => ({
+      ...prev,
+      [panel]: !prev[panel]
+    }));
+  };
 
   // Handle simulation resize when panels toggle
   useEffect(() => {
@@ -468,9 +616,9 @@ export function App() {
     return () => { isMounted.current = false; simRef.current?.dispose(); };
   }, []);
 
-  // Initialize Simulation when a zone is selected
+  // Automatically initialize the facility robotics scene on app load.
   useEffect(() => {
-      if (!mujocoReady || !selectedZone || !containerRef.current || !mujocoModuleRef.current) return;
+      if (!mujocoReady || !containerRef.current || !mujocoModuleRef.current) return;
 
       setSimLoading(true); 
       setIsBooting(true);
@@ -484,12 +632,8 @@ export function App() {
         try {
             simRef.current = new MujocoSim(containerRef.current, mujocoModuleRef.current);
             simRef.current.renderSys.setDarkMode(true);
-            
-            // Determine which model to load
-            const modelId = selectedZone.type === 'facility' ? 'franka_emika_panda' : 'franka_panda_stack';
-            const disasterType = selectedZone.type === 'facility' ? 'flood' : selectedZone.type;
-            
-            simRef.current.init(modelId, "scene.xml", disasterType, supplyLevel, (msg) => {
+
+            simRef.current.init('franka_emika_panda', "scene.xml", 'flood', (msg) => {
                if (isMounted.current) {
                  setSimStatus(msg);
                  setBootLogs(prev => [...prev.slice(-5), msg]);
@@ -499,20 +643,17 @@ export function App() {
                    if (isMounted.current) {
                        simRef.current?.setIkEnabled(false);
                        setSimLoading(false);
-                       if (selectedZone.type !== 'facility') {
-                           setTimeout(() => setIsBooting(false), 1000);
-                       } else {
-                           setSimLoading(false);
-                           setIsBooting(false);
-                       }
+                       setIsBooting(false);
+                       setAppSceneReady(true);
                    }
                })
                .catch(err => { 
                    if (isMounted.current) { 
                        console.error("Sim Init Error:", err);
                        setSimError(err.message); 
-                       setSimLoading(false); 
-                       setIsBooting(false);
+                        setSimLoading(false); 
+                        setIsBooting(false);
+                        setAppSceneReady(false);
                    } 
                });
                
@@ -522,12 +663,13 @@ export function App() {
                 setSimError((err as Error).message); 
                 setSimLoading(false); 
                 setIsBooting(false);
+                setAppSceneReady(false);
             } 
         }
       }, 300);
 
       return () => clearTimeout(timer);
-  }, [mujocoReady, selectedZoneKey, supplyLevel, simBootNonce]);
+  }, [mujocoReady, simBootNonce]);
 
   // Handle robotics execution sequence triggered by Coordinator
   useEffect(() => {
@@ -548,7 +690,9 @@ export function App() {
             console.log("Simulation finished, emitting robotics_complete");
             socket.emit('robotics_complete', { 
               missionId: currentMission.id,
-              armId: currentMission.data.assignedArmId
+              armId: currentMission.data.assignedArmId,
+              workspaceImage: topDownSnapshot,
+              boxImage: boxVerificationSnapshot
             });
             if (isMounted.current) setIsBooting(false);
           };
@@ -563,7 +707,7 @@ export function App() {
           }
         }
     }
-  }, [currentMission?.data.executionStatus]);
+  }, [currentMission?.data.executionStatus, topDownSnapshot, boxVerificationSnapshot]);
 
   // Handle resize when entering/exiting fullscreen
   useEffect(() => {
@@ -579,17 +723,27 @@ export function App() {
   }, [isRobotFullscreen]);
 
   useEffect(() => {
-    const shouldCapture = Boolean(simRef.current && selectedZone && (currentMission?.data.recommendation || currentMission?.data.pickSequence));
+    const shouldCapture = Boolean(simRef.current && appSceneReady);
     if (!shouldCapture) {
       setRoboticsSnapshot(null);
+      setTopDownSnapshot(null);
+      setBoxVerificationSnapshot(null);
       return;
     }
 
     const captureSnapshot = () => {
       try {
         const snapshot = simRef.current?.renderSys.getCanvasSnapshot(960, 540, 'image/jpeg');
+        const topDown = simRef.current?.renderSys.getTopDownSnapshot(720, 720, 'image/jpeg');
+        const boxVerification = simRef.current?.renderSys.getBoxVerificationSnapshot(720, 720, 'image/jpeg');
         if (snapshot) {
           setRoboticsSnapshot(snapshot);
+        }
+        if (topDown) {
+          setTopDownSnapshot(topDown);
+        }
+        if (boxVerification) {
+          setBoxVerificationSnapshot(boxVerification);
         }
       } catch (error) {
         console.warn('Failed to capture robotics snapshot:', error);
@@ -599,22 +753,7 @@ export function App() {
     captureSnapshot();
     const interval = window.setInterval(captureSnapshot, currentMission?.data.executionStatus === 'EXECUTING' ? 1200 : 2500);
     return () => window.clearInterval(interval);
-  }, [currentMission?.id, currentMission?.data.executionStatus, currentMission?.data.recommendation, currentMission?.data.pickSequence, selectedZoneKey, isRobotFullscreen]);
-
-  const handleMapClick = (e: any) => {
-    if (e.detail.latLng) {
-      const newZone: DisasterZone = {
-        id: Math.random().toString(36).substr(2, 9),
-        name: `New Incident ${zones.length + 1}`,
-        type: 'flood',
-        severity: 'medium',
-        lat: e.detail.latLng.lat,
-        lng: e.detail.latLng.lng,
-        description: 'Newly reported incident. Awaiting AI assessment.'
-      };
-      setZones([...zones, newZone]);
-    }
-  };
+  }, [appSceneReady, currentMission?.id, currentMission?.data.executionStatus, currentMission?.data.recommendation, currentMission?.data.pickSequence, isRobotFullscreen]);
 
   return (
     <div className="flex h-screen w-screen bg-[#050505] text-white overflow-hidden selection:bg-cyan-500/30 font-sans">
@@ -677,92 +816,185 @@ export function App() {
       >
         <div className="flex flex-col h-full">
           <div className="flex border-b border-white/10 bg-cyan-500/5">
-            <div className="flex-1 py-3 text-[10px] font-bold uppercase tracking-widest text-cyan-400 text-center border-b-2 border-cyan-400">
-              Discourse
+            <div className="relative flex-1 border-b-2 border-cyan-400 py-3 text-center">
+              <div className="absolute left-3 top-1/2 -translate-y-1/2 text-left">
+                <div className="text-[8px] font-black uppercase tracking-[0.18em] text-cyan-300">
+                  AI {usageStats?.gemini.totalCalls ?? 0}/{usageStats?.gemini.maxCalls ?? 0}
+                </div>
+                <div className="text-[8px] text-white/45">
+                  {Math.round(((usageStats?.gemini.inputTokens ?? 0) + (usageStats?.gemini.outputTokens ?? 0)) / 100) / 10}k tok | ${Number(usageStats?.gemini.estimatedCostUsd ?? 0).toFixed(3)}
+                </div>
+              </div>
+              <div className="text-[10px] font-bold uppercase tracking-widest text-cyan-400">
+                Discourse
+              </div>
+              <div className="absolute right-3 top-1/2 -translate-y-1/2 text-right">
+                <div className="text-[8px] font-black uppercase tracking-[0.18em] text-white/60">
+                  Map {usageStats?.mapLoads ?? 0}
+                </div>
+                <div className="text-[8px] text-white/40">
+                  Runs {usageStats?.missionStarts ?? 0}
+                </div>
+              </div>
             </div>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-4 space-y-6">
-            <div className="space-y-4 mb-6 pb-6 border-b border-white/10">
-              <div className="text-[10px] text-white/40 uppercase font-bold tracking-tighter mb-2 flex items-center gap-2">
-                <Settings className="w-3 h-3" />
-                System Controls
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="rounded-lg border border-white/10 bg-white/5 p-3">
-                  <div className="text-[8px] font-bold uppercase tracking-[0.25em] text-white/40">System State</div>
-                  <div className="mt-2 flex items-center gap-2">
-                    <span className={cn(
-                      "inline-flex rounded-full border px-2 py-1 text-[9px] font-black uppercase tracking-widest",
-                      missionSummary ? "border-emerald-400/50 bg-emerald-500/15 text-emerald-300" :
-                      currentMission ? "border-cyan-400/50 bg-cyan-500/15 text-cyan-300" :
-                      "border-white/10 bg-white/5 text-white/40"
-                    )}>
-                      {missionSummary ? 'Mission Complete' : currentMission ? formatProgressLabel(currentMission.progress) : 'Standby'}
-                    </span>
-                  </div>
-                  <div className="mt-3 text-[10px] text-white/55">
-                    Agent: <span className="font-bold text-white/80">{currentMission?.currentStep ?? 'COORDINATOR'}</span>
-                  </div>
-                </div>
-                <div className="rounded-lg border border-white/10 bg-white/5 p-3">
-                  <div className="text-[8px] font-bold uppercase tracking-[0.25em] text-white/40">Supply Profile</div>
-                  <div className="mt-3 flex gap-1">
-                    {(['low', 'medium', 'high'] as const).map((level) => (
-                      <button
-                        key={level}
-                        onClick={() => updateSupplyLevel(level)}
-                        className={cn(
-                          "flex-1 py-1.5 rounded text-[9px] font-bold uppercase tracking-widest transition-all border",
-                          supplyLevel === level
-                            ? "bg-cyan-500/20 border-cyan-500 text-cyan-400 shadow-[0_0_10px_rgba(0,242,255,0.2)]"
-                            : "bg-white/5 border-white/10 text-white/40 hover:bg-white/10"
-                        )}
-                      >
-                        {level}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="space-y-4 mb-6 pb-6 border-b border-white/10">
-              <div className="flex items-center justify-between">
-                <div className="text-[10px] text-white/40 uppercase font-bold tracking-tighter flex items-center gap-2">
-                  <Cpu className="w-3 h-3 text-purple-400" />
-                  Assembly Mini-Map
-                </div>
-                <span className="text-[8px] uppercase tracking-[0.2em] text-white/30">
-                  {currentMission?.data.executionStatus ?? 'STANDBY'}
-                </span>
-              </div>
-              <MiniArmOverview detections={roboticsDetections} currentStep={currentMission?.currentStep} />
-            </div>
-
+          <div className="flex-1 overflow-y-auto p-4 space-y-6" ref={discourseScrollRef} onScroll={handleDiscourseScroll}>
             <div className="space-y-4">
               <div className="flex items-center justify-between mb-2">
                 <div className="text-[10px] text-white/40 uppercase font-bold tracking-tighter">
-                  {missionSummary && viewMode === 'graph' ? 'Mission Flow' : 'Discourse'}
+                  Mission Control
                 </div>
                 <div className="flex items-center gap-2">
                   {missionSummary && (
                     <button 
-                      onClick={() => setViewMode(viewMode === 'logs' ? 'graph' : 'logs')}
+                      onClick={() => setIsFlowOverlayOpen(true)}
                       className="px-2 py-1 bg-white/5 border border-white/10 rounded text-[9px] font-bold text-white/60 hover:bg-white/10"
                     >
-                      {viewMode === 'logs' ? 'VIEW FLOW' : 'VIEW LOGS'}
+                      VIEW FLOW
                     </button>
                   )}
                   <button 
                     onClick={handleStartMission}
-                    className="px-3 py-1.5 bg-cyan-500/20 border border-cyan-500/50 rounded text-[9px] font-bold text-cyan-400 hover:bg-cyan-500/30 flex items-center gap-1 shadow-[0_0_18px_rgba(0,242,255,0.14)]"
+                    disabled={isMissionStarting || isMissionActive}
+                    className={cn(
+                      "px-3 py-1.5 rounded text-[9px] font-bold flex items-center gap-1 shadow-[0_0_18px_rgba(0,242,255,0.14)]",
+                      isMissionStarting || isMissionActive
+                        ? "bg-white/5 border border-white/10 text-white/35 cursor-not-allowed"
+                        : "bg-cyan-500/20 border border-cyan-500/50 text-cyan-400 hover:bg-cyan-500/30"
+                    )}
                   >
                     <Zap className="w-3 h-3" />
-                    START AEGIS MISSION
+                    {isMissionStarting ? 'STARTING...' : isMissionActive ? 'MISSION ACTIVE' : 'START AEGIS MISSION'}
                   </button>
                 </div>
               </div>
+
+              {usageStats?.gemini.lastBlockedReason && (
+                <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-3 py-2 text-[10px] leading-relaxed text-red-200">
+                  Budget guard: {usageStats.gemini.lastBlockedReason}
+                </div>
+              )}
+
+              <AnimatePresence mode="wait">
+                {showMissionFocusCard ? (
+                  <motion.div
+                    key="focus-card-idle"
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -12 }}
+                    className="rounded-2xl border border-cyan-500/20 bg-gradient-to-br from-cyan-500/10 via-[#08131b] to-transparent p-4"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className="text-[10px] font-black uppercase tracking-[0.28em] text-cyan-300">
+                          Live Mission Focus
+                        </div>
+                        <div className="mt-2 text-sm font-semibold text-white/85">
+                          {selectedZone?.name ?? 'Aegis Hub - Dubai Command'}
+                        </div>
+                        <div className="mt-2 text-[11px] leading-relaxed text-white/55">
+                          {selectedZone?.description
+                            ?? 'Mission highlights, agent reasoning, and robotics progress will gather here in a simpler flow.'}
+                        </div>
+                      </div>
+                      <div className="rounded-full border border-cyan-500/25 bg-cyan-500/10 px-2 py-1 text-[8px] font-black uppercase tracking-[0.24em] text-cyan-300">
+                        Standby
+                      </div>
+                    </div>
+
+                    <div className="mt-4 grid grid-cols-2 gap-2">
+                      <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+                        <div className="text-[8px] font-black uppercase tracking-[0.22em] text-white/35">Mission State</div>
+                        <div className="mt-1 text-[11px] font-semibold text-white/80">
+                          Ready for launch
+                        </div>
+                      </div>
+                      <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+                        <div className="text-[8px] font-black uppercase tracking-[0.22em] text-white/35">Assembly Status</div>
+                        <div className="mt-1 text-[11px] font-semibold text-white/80">
+                          Scene loaded
+                        </div>
+                      </div>
+                    </div>
+                  </motion.div>
+                ) : (
+                  <motion.div
+                    key="focus-card-live"
+                    initial={{ opacity: 0, y: 10 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -12 }}
+                    className={cn(
+                      "rounded-2xl border p-4",
+                      missionDisplayState.tone === 'failure'
+                        ? "border-red-400/20 bg-gradient-to-br from-red-500/10 via-[#13080b] to-transparent"
+                        : missionDisplayState.tone === 'success'
+                        ? "border-cyan-400/20 bg-gradient-to-br from-cyan-500/10 via-[#08131b] to-transparent"
+                        : "border-emerald-400/20 bg-gradient-to-br from-emerald-500/10 via-[#08131b] to-transparent"
+                    )}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div>
+                        <div className={cn(
+                          "text-[10px] font-black uppercase tracking-[0.28em]",
+                          missionDisplayState.tone === 'failure'
+                            ? "text-red-300"
+                            : missionDisplayState.tone === 'success'
+                            ? "text-cyan-300"
+                            : "text-emerald-300"
+                        )}>
+                          {missionDisplayState.tone === 'failure'
+                            ? 'Mission Failed'
+                            : missionDisplayState.tone === 'success'
+                            ? 'Mission Complete'
+                            : 'Mission Live'}
+                        </div>
+                        <div className="mt-2 text-sm font-semibold text-white/85">
+                          {currentMission?.data.selectedZone?.name ?? selectedZone?.name ?? 'Aegis Hub - Dubai Command'}
+                        </div>
+                        <div className="mt-2 text-[11px] leading-relaxed text-white/55">
+                          {missionDisplayState.detail}
+                        </div>
+                      </div>
+                      <div className={cn(
+                        "rounded-full border px-2 py-1 text-[8px] font-black uppercase tracking-[0.24em]",
+                        missionDisplayState.tone === 'failure'
+                          ? "border-red-400/25 bg-red-500/10 text-red-300"
+                          : missionDisplayState.tone === 'success'
+                          ? "border-cyan-400/25 bg-cyan-500/10 text-cyan-300"
+                          : "border-emerald-400/25 bg-emerald-500/10 text-emerald-300"
+                      )}>
+                        {missionDisplayState.tone === 'failure'
+                          ? 'Failed'
+                          : currentMission?.currentStep ?? 'Launching'}
+                      </div>
+                    </div>
+
+                    <div className="mt-4 grid grid-cols-3 gap-2">
+                      <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+                        <div className="text-[8px] font-black uppercase tracking-[0.22em] text-white/35">Mission State</div>
+                        <div className="mt-1 text-[11px] font-semibold text-white/80">
+                          {missionDisplayState.label}
+                        </div>
+                      </div>
+                      <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+                        <div className="text-[8px] font-black uppercase tracking-[0.22em] text-white/35">Assembly</div>
+                        <div className="mt-1 text-[11px] font-semibold text-white/80">
+                          {missionDisplayState.tone === 'failure'
+                            ? (currentMission?.data.executionStatus ?? 'Aborted')
+                            : (currentMission?.data.executionStatus ?? 'Preparing')}
+                        </div>
+                      </div>
+                      <div className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
+                        <div className="text-[8px] font-black uppercase tracking-[0.22em] text-white/35">Signals</div>
+                        <div className="mt-1 text-[11px] font-semibold text-white/80">
+                          {latestThinkingEvents.length > 0 ? `${latestThinkingEvents.length} live` : 'Streaming'}
+                        </div>
+                      </div>
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
 
               {currentMission && (
                 <div className="bg-white/5 rounded-lg border border-white/10 overflow-hidden">
@@ -774,8 +1006,16 @@ export function App() {
               )}
 
               {latestThinkingEvents.length > 0 && (
-                <div className="grid gap-2">
-                  {latestThinkingEvents.map(event => (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="text-[10px] font-black uppercase tracking-[0.24em] text-white/45">
+                      Latest Updates
+                    </div>
+                    <div className="text-[9px] text-white/25">
+                      {latestThinkingEvents.length} live signals
+                    </div>
+                  </div>
+                  {latestThinkingEvents.slice(0, 4).map(event => (
                     <div key={event.traceId} className="rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-3">
                       <div className="flex items-center justify-between">
                         <span className="text-[9px] font-black uppercase tracking-widest text-cyan-300">{event.sourceAgent}</span>
@@ -822,17 +1062,15 @@ export function App() {
                 </motion.div>
               )}
 
-              <div className="space-y-4 max-h-[calc(100vh-360px)] overflow-y-auto pr-2 custom-scrollbar">
+              <div className="space-y-4 max-h-[calc(100vh-420px)] overflow-y-auto pr-2 custom-scrollbar">
                 {missionEvents.length === 0 ? (
                   <div className="rounded-2xl border border-dashed border-white/10 bg-gradient-to-br from-white/5 to-transparent p-6 text-center">
                     <div className="text-[10px] uppercase tracking-[0.3em] text-white/25">Operator Console Idle</div>
                     <div className="mt-3 text-sm font-semibold text-white/70">Select a zone and launch a trial run.</div>
                     <div className="mt-2 text-[11px] text-white/35">Live agent cognition, mission flow, and robotic telemetry will appear here.</div>
                   </div>
-                ) : missionSummary && viewMode === 'graph' ? (
-                  <MissionGraph events={missionEvents} />
                 ) : (
-                  missionEvents.map((event) => (
+                  missionEvents.slice(0, 8).map((event) => (
                     <div key={event.traceId} className={cn(
                       "space-y-1 rounded-xl border p-3",
                       event.status === 'ERROR'
@@ -888,6 +1126,50 @@ export function App() {
 
       {/* Main Map Content */}
       <main className="flex-1 relative">
+        <AnimatePresence>
+          {isFlowOverlayOpen && missionSummary && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 z-[95] bg-black/70 backdrop-blur-sm p-6 pt-20"
+            >
+              <motion.div
+                initial={{ opacity: 0, y: 18, scale: 0.98 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 10, scale: 0.98 }}
+                className="mx-auto flex h-full max-w-6xl flex-col rounded-[28px] border border-cyan-500/25 bg-[#061018]/95 shadow-[0_0_60px_rgba(34,211,238,0.12)]"
+              >
+                <div className="flex items-center justify-between border-b border-white/10 px-6 py-4">
+                  <div>
+                    <div className="text-[10px] font-black uppercase tracking-[0.3em] text-cyan-300">
+                      Mission Flow Overlay
+                    </div>
+                    <div className="mt-1 text-sm text-white/60">
+                      Full mission graph for the current completed run.
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => {
+                      setIsFlowOverlayOpen(false);
+                      setViewMode('logs');
+                    }}
+                    className="rounded-full border border-white/10 bg-white/5 p-2 text-white/60 hover:bg-white/10 hover:text-white"
+                    aria-label="Close mission flow overlay"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+                <div className="min-h-0 flex-1 overflow-hidden p-6">
+                  <div className="h-full overflow-auto rounded-2xl border border-white/10 bg-black/20 p-4">
+                    <MissionGraph events={missionEvents} />
+                  </div>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
         {/* MuJoCo Container at Root Level */}
         <div 
           ref={containerRef} 
@@ -1044,15 +1326,15 @@ export function App() {
                   2. Add GOOGLE_MAPS_API_KEY<br />
                   3. Refresh Application
                 </div>
-              </div>
-            </div>
-          )}
+                  </div>
+                </div>
+              )}
+
           <GoogleMap
             defaultCenter={{ lat: 25.2048, lng: 55.2708 }}
             defaultZoom={12}
             disableDefaultUI={true}
             disableDoubleClickZoom={true}
-            onClick={handleMapClick}
             mapId="DEMO_MAP_ID"
           >
             {zones.map((zone) => (
@@ -1060,12 +1342,16 @@ export function App() {
                 key={zone.id}
                 position={{ lat: zone.lat, lng: zone.lng }}
                 anchorPoint={AdvancedMarkerAnchorPoint.CENTER}
-                onClick={() => setSelectedZone(zone)}
+                onClick={() => {
+                  setSelectedZone(zone);
+                  setIsZonePanelDismissed(false);
+                }}
               >
                 <div 
                   onDoubleClick={() => {
                     if (zone.type === 'facility') {
                       setSelectedZone(zone);
+                      setIsZonePanelDismissed(false);
                       setRightPanelOpen(true);
                       setIsRobotFullscreen(true);
                     }
@@ -1152,8 +1438,8 @@ export function App() {
           rightPanelOpen ? "w-96" : "w-0 overflow-hidden"
         )}
       >
-        <div className="p-6 space-y-8 h-full overflow-y-auto custom-scrollbar">
-          {selectedZone ? (
+        <div className="p-6 space-y-8 h-full overflow-y-auto custom-scrollbar" ref={panelScrollRef} onScroll={handlePanelScroll}>
+          {!isZonePanelDismissed && panelZone ? (
             <motion.div 
               initial={{ opacity: 0, x: 20 }}
               animate={{ opacity: 1, x: 0 }}
@@ -1162,31 +1448,35 @@ export function App() {
               <div className="flex items-start justify-between">
                 <div className="flex items-start gap-4">
                   <div 
-                    onDoubleClick={openRobotFullscreen}
+                    onDoubleClick={() => {
+                      if (appSceneReady) {
+                        setIsRobotFullscreen(true);
+                      }
+                    }}
                     className={cn(
                       "p-3 rounded-lg border cursor-pointer hover:bg-white/5 transition-colors",
-                      selectedZone.type === 'facility' ? "bg-purple-500/10 border-purple-500/30" : "bg-cyan-500/10 border-cyan-500/30"
+                      panelZone.type === 'facility' ? "bg-purple-500/10 border-purple-500/30" : "bg-cyan-500/10 border-cyan-500/30"
                     )}
                   >
-                    {selectedZone.type === 'facility' ? <Factory className="w-6 h-6 text-purple-400" /> : <AlertTriangle className="w-6 h-6 text-cyan-400" />}
+                    {panelZone.type === 'facility' ? <Factory className="w-6 h-6 text-purple-400" /> : <AlertTriangle className="w-6 h-6 text-cyan-400" />}
                   </div>
                   <div>
-                    <h2 className="text-xl font-bold tracking-tighter uppercase">{selectedZone.name}</h2>
+                    <h2 className="text-xl font-bold tracking-tighter uppercase">{panelZone.name}</h2>
                     <div className="flex items-center gap-2 mt-1">
                       <span className={cn(
                         "px-2 py-0.5 rounded text-[8px] font-bold uppercase",
-                        selectedZone.severity === 'critical' ? "bg-red-500/20 text-red-400 border border-red-500/50" :
-                        selectedZone.severity === 'high' ? "bg-orange-500/20 text-orange-400 border border-orange-500/50" :
-                        selectedZone.severity === 'nominal' ? "bg-purple-500/20 text-purple-400 border border-purple-500/50" :
+                        panelZone.severity === 'critical' ? "bg-red-500/20 text-red-400 border border-red-500/50" :
+                        panelZone.severity === 'high' ? "bg-orange-500/20 text-orange-400 border border-orange-500/50" :
+                        panelZone.severity === 'nominal' ? "bg-purple-500/20 text-purple-400 border border-purple-500/50" :
                         "bg-cyan-500/20 text-cyan-400 border border-cyan-500/50"
                       )}>
-                        {selectedZone.severity} Severity
+                        {panelZone.severity} Severity
                       </span>
-                      <span className="text-[10px] text-white/40 uppercase">{selectedZone.type}</span>
+                      <span className="text-[10px] text-white/40 uppercase">{panelZone.type}</span>
                     </div>
                   </div>
                 </div>
-                <button onClick={() => setSelectedZone(null)} className="text-white/40 hover:text-white">
+                <button onClick={() => setIsZonePanelDismissed(true)} className="text-white/40 hover:text-white">
                   <Plus className="w-5 h-5 rotate-45" />
                 </button>
               </div>
@@ -1196,56 +1486,18 @@ export function App() {
                   <div className="text-[10px] text-white/40 uppercase font-bold mb-2 flex items-center gap-2">
                     <Info className="w-3 h-3" /> Situation Assessment
                   </div>
-                  <p className="text-sm text-white/80 leading-relaxed">
-                    {selectedZone.description}
-                  </p>
-                </div>
-
-                <div className="space-y-4">
-                  <button 
-                    onClick={handleStartMission}
-                    className="w-full py-3 bg-cyan-500 hover:bg-cyan-400 text-black font-black uppercase tracking-widest rounded flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(0,242,255,0.3)] transition-all"
-                  >
-                    <Zap className="w-4 h-4" />
-                    Deploy AEGIS Response
-                  </button>
-
-                  {/* Autonomous kit assignments */}
                   <div className="space-y-2">
-                    <div className="text-[10px] text-white/40 uppercase font-bold tracking-tighter">Autonomous kit assignments</div>
-                    <div className="flex flex-wrap gap-2">
-                      {missionStore.getActiveMissions()
-                        .filter(m => 
-                          (m.data.selectedZone?.id === selectedZone.id || m.data.selectedZone?.name === selectedZone.name) &&
-                          m.data.kitSpecialization
-                        )
-                        .map((m, i) => (
-                          <span 
-                            key={i} 
-                            className={cn(
-                              "px-2 py-1 rounded text-[9px] font-bold uppercase border",
-                              m.data.kitSpecialization === KitSpecialization.SEARCH_RESCUE ? "bg-red-500/20 text-red-400 border-red-500/50" :
-                              m.data.kitSpecialization === KitSpecialization.MEDICAL ? "bg-orange-500/20 text-orange-400 border-orange-500/50" :
-                              m.data.kitSpecialization === KitSpecialization.WATER_SANITATION ? "bg-cyan-500/20 text-cyan-400 border-cyan-500/50" :
-                              "bg-purple-500/20 text-purple-400 border-purple-500/50"
-                            )}
-                          >
-                            {m.data.kitSpecialization?.replace('_', ' ')}
-                          </span>
-                        ))}
-                      {missionStore.getActiveMissions().filter(m => 
-                        (m.data.selectedZone?.id === selectedZone.id || m.data.selectedZone?.name === selectedZone.name) &&
-                        m.data.kitSpecialization
-                      ).length === 0 && (
-                        <span className="text-[9px] text-white/20 uppercase italic">No active assignments</span>
-                      )}
-                    </div>
+                    {selectedZoneImportance.map((line, index) => (
+                      <p key={`${line}-${index}`} className="text-sm text-white/80 leading-relaxed">
+                        {line}
+                      </p>
+                    ))}
                   </div>
                 </div>
 
                 <div className="space-y-3">
                   <div className="text-[10px] text-white/40 uppercase font-bold flex items-center justify-between">
-                    <span>AI Intervention Strategy</span>
+                    <span>Target Priority Brief</span>
                     {currentMission && (
                       <span className="inline-flex items-center gap-1 text-[8px] font-black tracking-[0.25em] text-cyan-300">
                         <Radio className="w-3 h-3 animate-pulse text-cyan-400" />
@@ -1262,11 +1514,18 @@ export function App() {
                         </div>
                         <div className="space-y-2">
                           <div className="text-[10px] font-black uppercase tracking-[0.3em] text-white/70">
-                            Waiting For Mission Start
+                            Auto-Updating Target Context
                           </div>
-                          <p className="text-xs leading-relaxed text-white/45">
-                            Select an incident and launch AEGIS to see live agent reasoning, robotics vision output, and delivery orchestration appear here.
-                          </p>
+                          <div className="space-y-2 text-xs leading-relaxed text-white/50">
+                            <p>
+                              {panelZone.type === 'facility'
+                                ? 'This hub is the current response origin, so the panel stays pinned to live facility readiness and routing context.'
+                                : `${panelZone.name} is the AI-prioritized target area based on mission triage, proximity, severity, and live intelligence.`}
+                            </p>
+                            {(selectedZoneImportance.slice(1, 3)).map((line, index) => (
+                              <p key={`${line}-${index}`}>{line}</p>
+                            ))}
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -1280,14 +1539,25 @@ export function App() {
                         <div className="flex items-center justify-between">
                           <div>
                             <div className="text-[10px] font-black uppercase tracking-[0.28em] text-cyan-300">
-                              Agent Reasoning
+                              Mission Brief
                             </div>
                             <div className="mt-1 text-xs text-white/55">
-                              Live chain-of-action from coordinator, planning, robotics, and delivery agents.
+                              The most important mission updates are summarized here so you do not need to scan every system trace.
                             </div>
                           </div>
                           <div className="rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[8px] font-black uppercase tracking-[0.24em] text-cyan-300">
                             {currentMission.currentStep ?? 'COORDINATOR'}
+                          </div>
+                        </div>
+                        <div className="mt-4 rounded-xl border border-white/10 bg-black/20 p-3">
+                          <div className="text-[8px] font-black uppercase tracking-[0.24em] text-white/35">
+                            Why this area matters
+                          </div>
+                          <div className="mt-2 text-[11px] leading-relaxed text-white/72">
+                            {currentMission.data.sponsorSignals?.mcpBrief
+                              ?? currentMission.data.selectedZone?.description
+                              ?? panelZone?.description
+                              ?? 'The system will explain why this target was prioritized once triage and grounding complete.'}
                           </div>
                         </div>
                         <div className="mt-4 grid gap-2">
@@ -1313,10 +1583,10 @@ export function App() {
                         <div className="mb-3 flex items-center justify-between">
                           <div>
                             <div className="text-[10px] font-black uppercase tracking-[0.28em] text-white/55">
-                              Assembly Arm Feed
+                              Robotics Workspace
                             </div>
                             <div className="mt-1 text-[11px] text-white/40">
-                              Live workspace snapshot with Gemini Robotics-ER 1.5 detections.
+                              One panel for the live arm view, kit recommendation, and verification status.
                             </div>
                           </div>
                           <div className="flex items-center gap-2">
@@ -1352,20 +1622,22 @@ export function App() {
                               <div className="absolute inset-x-0 top-0 h-20 bg-gradient-to-b from-black/65 via-black/20 to-transparent" />
                               <div className="absolute left-3 top-3 rounded-lg border border-cyan-500/20 bg-black/55 px-3 py-2 backdrop-blur-sm">
                                 <div className="text-[8px] font-black uppercase tracking-[0.24em] text-cyan-300">
-                                  Gemini Robotics-ER 1.5
+                                  {roboticsVisionLog ? roboticsVisionLog.model : 'Arm Workspace'}
                                 </div>
                                 <div className="mt-1 text-[10px] text-white/65">
-                                  {roboticsVisionLog?.summary}
+                                  {roboticsVisionLog?.summary ?? 'Facility arm scene loaded and ready for mission execution.'}
                                 </div>
                               </div>
-                              <div className="absolute inset-0 pointer-events-none overflow-hidden opacity-20">
-                                <motion.div
-                                  initial={{ y: '-100%' }}
-                                  animate={{ y: '100%' }}
-                                  transition={{ duration: 3.6, repeat: Infinity, ease: "linear" }}
-                                  className="h-1/2 w-full bg-gradient-to-b from-transparent via-cyan-400 to-transparent"
-                                />
-                              </div>
+                              {roboticsVisionLog && (
+                                <div className="absolute inset-0 pointer-events-none overflow-hidden opacity-20">
+                                  <motion.div
+                                    initial={{ y: '-100%' }}
+                                    animate={{ y: '100%' }}
+                                    transition={{ duration: 3.6, repeat: Infinity, ease: "linear" }}
+                                    className="h-1/2 w-full bg-gradient-to-b from-transparent via-cyan-400 to-transparent"
+                                  />
+                                </div>
+                              )}
                             </>
                           ) : (
                             <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-center">
@@ -1376,11 +1648,9 @@ export function App() {
                             </div>
                           )}
                         </div>
-                      </div>
-
-                      <div className="grid gap-4 xl:grid-cols-2">
-                        <div className="space-y-3">
-                          <div className="text-[10px] text-white/40 uppercase font-bold tracking-tighter">Active Recommendation</div>
+                        <div className="mt-4 grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
+                          <div className="space-y-3">
+                            <div className="text-[10px] text-white/40 uppercase font-bold tracking-tighter">Kit Recommendation</div>
                           {currentMission.data.recommendation ? (
                             <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/10 p-4 space-y-4">
                               <div className="flex justify-between items-start gap-3">
@@ -1422,26 +1692,136 @@ export function App() {
                               Strategy generation is in progress. Recommendation details will appear as soon as planning completes.
                             </div>
                           )}
-                        </div>
+                          </div>
 
-                        <div className="space-y-3">
-                          <div className="text-[10px] text-white/40 uppercase font-bold tracking-tighter">Vision Response</div>
-                          <div className="rounded-xl border border-white/10 bg-[#071017] p-4">
-                            <div className="mb-2 flex items-center justify-between">
-                              <span className="text-[8px] font-black uppercase tracking-[0.24em] text-cyan-300">
-                                Gemini Robotics JSON
-                              </span>
-                              <span className="text-[8px] text-white/35">
-                                {roboticsDetections.length} detections
-                              </span>
-                            </div>
-                            <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-lg border border-white/10 bg-black/35 p-3 text-[10px] leading-relaxed text-cyan-100/85">
+                          <div className="space-y-3">
+                            <div className="text-[10px] text-white/40 uppercase font-bold tracking-tighter">Vision Status</div>
+                            <div className="rounded-xl border border-white/10 bg-[#071017] p-4">
+                              <div className="flex items-center justify-between">
+                                <span className="text-[8px] font-black uppercase tracking-[0.24em] text-cyan-300">
+                                  {roboticsVisionLog?.model ?? 'Gemini Robotics-ER 1.5'}
+                                </span>
+                                <span className="text-[8px] text-white/35">
+                                  {roboticsDetections.length} detections
+                                </span>
+                              </div>
+                              <div className="mt-3 text-[11px] leading-relaxed text-white/65">
+                                {roboticsVisionLog?.summary ?? 'Awaiting structured perception response from the robotics vision model.'}
+                              </div>
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                {(roboticsDetections.length > 0 ? roboticsDetections : (currentMission.data.recommendation?.items ?? []).slice(0, 6)).map((item: any, index: number) => {
+                                  const label = typeof item === 'string'
+                                    ? item.replace(/_/g, ' ')
+                                    : (item.label ?? item.item ?? `target ${index + 1}`);
+                                  return (
+                                    <span key={`${label}-${index}`} className="rounded-full border border-white/10 bg-white/5 px-2 py-1 text-[9px] uppercase tracking-[0.18em] text-white/70">
+                                      {label}
+                                    </span>
+                                  );
+                                })}
+                              </div>
+                              <button
+                                onClick={() => toggleDebugPanel('vision')}
+                                className="mt-4 flex w-full items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left text-[10px] font-black uppercase tracking-[0.22em] text-white/60 hover:bg-white/10"
+                              >
+                                <span>Raw Vision Response</span>
+                                <ChevronDown className={cn("h-4 w-4 transition-transform", expandedDebugPanels.vision && "rotate-180")} />
+                              </button>
+                              <AnimatePresence initial={false}>
+                                {expandedDebugPanels.vision && (
+                                  <motion.div
+                                    initial={{ opacity: 0, height: 0 }}
+                                    animate={{ opacity: 1, height: 'auto' }}
+                                    exit={{ opacity: 0, height: 0 }}
+                                    className="overflow-hidden"
+                                  >
+                                    <pre className="mt-3 max-h-64 overflow-auto whitespace-pre-wrap rounded-lg border border-white/10 bg-black/35 p-3 text-[10px] leading-relaxed text-cyan-100/85">
 {JSON.stringify(roboticsVisionLog ?? {
-  model: 'Gemini Robotics-ER 1.5',
+  model: 'gemini-robotics-er-1.5-preview',
   summary: 'Awaiting structured perception response.',
   result: []
 }, null, 2)}
-                            </pre>
+                                    </pre>
+                                  </motion.div>
+                                )}
+                              </AnimatePresence>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="grid gap-4 xl:grid-cols-[0.95fr_1.05fr]">
+                        <div className="space-y-3">
+                          <div className="text-[10px] text-white/40 uppercase font-bold tracking-tighter">Verification</div>
+                          <div className="rounded-xl border border-white/10 bg-[#071017] p-4">
+                            <div className="mb-3 flex items-center justify-between">
+                              <span className="text-[8px] font-black uppercase tracking-[0.24em] text-cyan-300">
+                                Overhead Box Camera
+                              </span>
+                              <span className="text-[8px] text-white/35">
+                                {currentMission.data.boxVerification?.verified ? 'verified' : 'monitoring'}
+                              </span>
+                            </div>
+                            <div className="relative aspect-square overflow-hidden rounded-lg border border-white/10 bg-black">
+                              {boxVerificationSnapshot ? (
+                                <img src={boxVerificationSnapshot} alt="Brown box verification camera" className="h-full w-full object-cover" />
+                              ) : (
+                                <div className="absolute inset-0 flex items-center justify-center text-[10px] uppercase tracking-[0.22em] text-white/35">
+                                  awaiting camera
+                                </div>
+                              )}
+                            </div>
+                            <div className="mt-3 text-[10px] leading-relaxed text-white/55">
+                              {currentMission.data.boxVerification?.summary ?? 'LoopAgent verification starts after the robotic handoff completes.'}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="space-y-3">
+                          <div className="text-[10px] text-white/40 uppercase font-bold tracking-tighter">Operations Snapshot</div>
+                          <div className="rounded-xl border border-white/10 bg-[#071017] p-4 space-y-3">
+                            <div className="rounded-lg border border-white/10 bg-black/25 px-3 py-2">
+                              <div className="text-[8px] font-black uppercase tracking-[0.22em] text-cyan-300">Grounded Data</div>
+                              <div className="mt-1 text-[10px] leading-relaxed text-white/65">
+                                {currentMission.data.sponsorSignals?.mcpBrief ?? 'Awaiting humanitarian grounding.'}
+                              </div>
+                            </div>
+                            <div className="rounded-lg border border-white/10 bg-black/25 px-3 py-2">
+                              <div className="text-[8px] font-black uppercase tracking-[0.22em] text-cyan-300">External Specialist</div>
+                              <div className="mt-1 text-[10px] leading-relaxed text-white/65">
+                                {currentMission.data.sponsorSignals?.a2aHandshake ?? 'Awaiting external specialist handshake.'}
+                              </div>
+                            </div>
+                            <div className="rounded-lg border border-white/10 bg-black/25 px-3 py-2">
+                              <div className="text-[8px] font-black uppercase tracking-[0.22em] text-cyan-300">Verification Targets</div>
+                              <div className="mt-1 text-[10px] text-white/65">
+                                {(currentMission.data.boxVerification?.detectedItems ?? currentMission.data.recommendation?.items ?? [])
+                                  .slice(0, 8)
+                                  .map(item => item.replace(/_/g, ' '))
+                                  .join(', ') || 'Awaiting verification'}
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => toggleDebugPanel('operations')}
+                              className="flex w-full items-center justify-between rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-left text-[10px] font-black uppercase tracking-[0.22em] text-white/60 hover:bg-white/10"
+                            >
+                              <span>Raw Mission Data</span>
+                              <ChevronDown className={cn("h-4 w-4 transition-transform", expandedDebugPanels.operations && "rotate-180")} />
+                            </button>
+                            <AnimatePresence initial={false}>
+                              {expandedDebugPanels.operations && (
+                                <motion.div
+                                  initial={{ opacity: 0, height: 0 }}
+                                  animate={{ opacity: 1, height: 'auto' }}
+                                  exit={{ opacity: 0, height: 0 }}
+                                  className="overflow-hidden"
+                                >
+                                  <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-lg border border-white/10 bg-black/35 p-3 text-[10px] leading-relaxed text-cyan-100/85">
+{JSON.stringify(rawOperationsSnapshot, null, 2)}
+                                  </pre>
+                                </motion.div>
+                              )}
+                            </AnimatePresence>
                           </div>
                         </div>
                       </div>
@@ -1518,6 +1898,68 @@ export function App() {
       >
         {rightPanelOpen ? <ChevronRight className="w-4 h-4" /> : <ChevronLeft className="w-4 h-4" />}
       </button>
+
+      {!appSceneReady && (
+        <div className="absolute inset-0 z-[130] flex items-center justify-center bg-[#020617] p-6">
+          {simError ? (
+            <div className="max-w-md space-y-5 rounded-3xl border border-red-500/30 bg-black/60 p-8 text-center shadow-[0_0_40px_rgba(239,68,68,0.12)]">
+              <AlertTriangle className="mx-auto h-12 w-12 text-red-400" />
+              <div>
+                <div className="text-sm font-black uppercase tracking-[0.28em] text-red-300">Robotic Scene Failed</div>
+                <p className="mt-3 text-sm leading-relaxed text-white/65">{simError}</p>
+              </div>
+              <div className="flex justify-center gap-3">
+                <button
+                  onClick={retrySimulationBoot}
+                  className="rounded-lg border border-white/10 bg-white/5 px-4 py-2 text-[10px] font-black uppercase tracking-[0.24em] text-white/70 hover:bg-white/10"
+                >
+                  Retry Scene
+                </button>
+                <button
+                  onClick={() => window.location.reload()}
+                  className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-2 text-[10px] font-black uppercase tracking-[0.24em] text-red-300 hover:bg-red-500/20"
+                >
+                  Reload App
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="w-full max-w-lg rounded-[28px] border border-cyan-500/20 bg-black/50 p-8 shadow-[0_0_60px_rgba(34,211,238,0.08)] backdrop-blur-xl">
+              <div className="flex items-start gap-5">
+                <div className="relative mt-1">
+                  <div className="absolute inset-0 rounded-full bg-cyan-400/20 blur-2xl" />
+                  <Loader2 className="relative h-12 w-12 animate-spin text-cyan-300" />
+                </div>
+                <div className="flex-1">
+                  <div className="text-[11px] font-black uppercase tracking-[0.32em] text-cyan-300">Loading Robotic Scene</div>
+                  <div className="mt-2 text-2xl font-black tracking-tight text-white">Auto-booting the Franka workspace</div>
+                  <p className="mt-3 text-sm leading-relaxed text-white/55">
+                    The web app is bringing the robotic arm scene online automatically so the workspace is ready before you start a mission.
+                  </p>
+                </div>
+              </div>
+              <div className="mt-6 h-1.5 overflow-hidden rounded-full bg-white/5">
+                <motion.div
+                  initial={{ width: 0 }}
+                  animate={{ width: '100%' }}
+                  transition={{ duration: 2.4, repeat: Infinity, ease: "linear" }}
+                  className="h-full bg-cyan-400 shadow-[0_0_18px_rgba(34,211,238,0.45)]"
+                />
+              </div>
+              <div className="mt-5 rounded-2xl border border-white/10 bg-[#061018] p-4 font-mono text-[11px] text-cyan-100/60">
+                <div className="text-[9px] font-black uppercase tracking-[0.24em] text-cyan-300/70">Boot Trace</div>
+                <div className="mt-3 space-y-1">
+                  {(bootLogs.length > 0 ? bootLogs.slice(-5) : [simStatus || 'Preparing MuJoCo workspace...']).map((log, index) => (
+                    <div key={`${log}-${index}`} className="truncate">
+                      {log}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1571,8 +2013,20 @@ function DroneStatus({ label, status, progress }: { label: string, status: strin
   );
 }
 
-function MiniArmOverview({ detections, currentStep }: { detections: VisionDetection[], currentStep?: string | null }) {
-  const armPose = detections.length > 0 ? detections[0].source : [0.42, -0.02, 0.1];
+function MiniArmOverview({
+  detections,
+  currentStep,
+  snapshot
+}: {
+  detections: VisionDetection[],
+  currentStep?: string | null,
+  snapshot?: string | null
+}) {
+  const topDownLog = detections.length > 0 ? {
+    result: detections.map(detection => ({
+      box_2d: detection.box_2d
+    }))
+  } : null;
 
   return (
     <div className="rounded-xl border border-white/10 bg-[#081018] p-3">
@@ -1581,55 +2035,32 @@ function MiniArmOverview({ detections, currentStep }: { detections: VisionDetect
           Top-Down Workspace
         </div>
         <div className="text-[8px] uppercase tracking-[0.2em] text-white/30">
-          {currentStep ?? 'IDLE'}
+          {currentStep ?? 'SCAN'}
         </div>
       </div>
 
-      <div className="relative aspect-square overflow-hidden rounded-lg border border-white/10 bg-[radial-gradient(circle_at_center,rgba(20,30,42,0.9),rgba(4,8,12,1))]">
-        <div className="absolute inset-4 rounded-[22px] border border-[#f59e0b]/40" />
-        <div className="absolute inset-x-8 top-8 h-[1px] bg-cyan-400/10" />
-        <div className="absolute inset-x-8 bottom-8 h-[1px] bg-cyan-400/10" />
-        <div className="absolute inset-y-8 left-8 w-[1px] bg-cyan-400/10" />
-        <div className="absolute inset-y-8 right-8 w-[1px] bg-cyan-400/10" />
-
-        <div
-          className="absolute h-14 w-14 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/20 bg-white/5 shadow-[0_0_18px_rgba(255,255,255,0.05)]"
-          style={{
-            left: `${18 + ((armPose[0] - 0.2) / 0.55) * 64}%`,
-            top: `${72 - ((armPose[1] + 0.35) / 0.85) * 52}%`
-          }}
-        >
-          <div className="absolute inset-2 rounded-full border border-cyan-400/20" />
-          <div className="absolute left-1/2 top-1/2 h-8 w-2 -translate-x-1/2 -translate-y-full rounded-full bg-slate-200/80 shadow-[0_0_14px_rgba(226,232,240,0.35)]" />
-          <div className="absolute left-1/2 top-[34%] h-10 w-1 -translate-x-1/2 rounded-full bg-slate-300/80 rotate-45 origin-bottom" />
-          <div className="absolute left-1/2 top-[34%] h-8 w-1 -translate-x-1/2 rounded-full bg-slate-300/80 -rotate-45 origin-bottom" />
-          <div className="absolute left-1/2 top-1/2 h-2 w-2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-cyan-400 shadow-[0_0_12px_rgba(34,211,238,0.5)]" />
+      {snapshot ? (
+        <div className="relative aspect-square overflow-hidden rounded-lg border border-cyan-500/20 bg-black">
+          <img src={snapshot} alt="Top-down robotics workspace" className="h-full w-full object-cover" />
+          {topDownLog && <LogOverlay log={topDownLog} />}
+          <div className="absolute inset-x-0 top-0 h-16 bg-gradient-to-b from-black/65 via-black/20 to-transparent" />
+          <div className="absolute left-3 top-3 rounded-md border border-cyan-500/30 bg-black/55 px-2 py-1 text-[8px] font-black uppercase tracking-[0.2em] text-cyan-300">
+            Scan Camera
+          </div>
+          <div className="absolute bottom-3 left-3 rounded-md border border-white/10 bg-black/40 px-2 py-1 text-[8px] uppercase tracking-[0.18em] text-white/55">
+            sent to gemini robotics-er 1.5
+          </div>
         </div>
-
-        {detections.map((detection, index) => (
-          <div
-            key={`${detection.item}-${index}`}
-            className={cn(
-              "absolute -translate-x-1/2 -translate-y-1/2 rounded-md border px-2 py-1 shadow-[0_0_12px_rgba(0,0,0,0.35)]",
-              detection.status === 'ACTIVE'
-                ? "border-cyan-400/70 bg-cyan-500/20"
-                : "border-white/15 bg-white/10"
-            )}
-            style={{
-              left: `${18 + ((detection.source[0] - 0.2) / 0.55) * 64}%`,
-              top: `${72 - ((detection.source[1] + 0.35) / 0.85) * 52}%`
-            }}
-          >
-            <div className="text-[8px] font-black uppercase tracking-[0.18em] text-white/80">
-              {detection.item.replace(/_/g, ' ')}
+      ) : (
+        <div className="relative aspect-square overflow-hidden rounded-lg border border-white/10 bg-black/50">
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-center">
+            <Loader2 className="h-5 w-5 animate-spin text-cyan-400/70" />
+            <div className="text-[10px] font-black uppercase tracking-[0.28em] text-white/40">
+              Loading Overhead Camera
             </div>
           </div>
-        ))}
-
-        <div className="absolute bottom-3 left-3 rounded-md border border-white/10 bg-black/35 px-2 py-1 text-[8px] uppercase tracking-[0.18em] text-white/45">
-          tray view
         </div>
-      </div>
+      )}
 
       <div className="mt-3 flex items-center justify-between text-[9px] uppercase tracking-[0.18em] text-white/35">
         <span>{detections.length} targets</span>
