@@ -99,6 +99,7 @@ export class RoboticsAgent {
       // 2. Notify Start
       const startPayload = { 
         plan: { steps: payload.steps },
+        armId: selectedArm.armId,
         startPose: [0, 0, 0.45], // Default home pose
         targetPoses: payload.steps.map(s => s.target),
         safetyChecks: payload.safetyNotes,
@@ -191,6 +192,7 @@ export class RoboticsAgent {
       }
     );
     context.agent.sendMessage(AgentType.COORDINATOR, failEvent);
+    this.missionContexts.delete(missionId);
 
     if (armId !== 'unknown') {
       this.freeArm(armId, context);
@@ -245,6 +247,7 @@ export class RoboticsAgent {
       arm.missionId = null;
     }
     this.missionQueue = [];
+    this.missionContexts.clear();
     console.log('[RoboticsAgent] Execution stopped and queue cleared.');
   }
 

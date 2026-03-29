@@ -10,11 +10,14 @@ import {
   InventoryReleaseInputSchema, 
   InventoryReleaseOutputSchema,
   InventoryCheckStockInputSchema,
-  InventoryCheckStockOutputSchema
+  InventoryCheckStockOutputSchema,
+  InventoryConsumeMissionInputSchema,
+  InventoryConsumeMissionOutputSchema
 } from '../types/adk';
 
 export class InventoryAgent {
-  private static claimed: Map<string, string> = new Map(); // itemName -> missionId
+  private static claimsByItem: Map<string, Map<string, number>> = new Map();
+  private static claimsByMission: Map<string, Map<string, number>> = new Map();
   private static stock: Record<string, number> = { ...Object.fromEntries(Object.entries(MOCK_INVENTORY).map(([k, v]) => [k, v.quantity])) };
   private static _unsubscribe: (() => void) | null = null;
 
@@ -24,6 +27,8 @@ export class InventoryAgent {
 
   static setSupplyLevel(level: 'low' | 'medium' | 'high') {
     console.log(`[Inventory] Setting supply levels to ${level}`);
+    this.claimsByItem.clear();
+    this.claimsByMission.clear();
     for (const item in MOCK_INVENTORY) {
       if (level === 'high') {
         this.stock[item] = 3;
@@ -39,10 +44,10 @@ export class InventoryAgent {
   // ADK Tool Methods
   static query(item: string) {
     const quantity = this.stock[item] || 0;
-    const claimedBy = this.claimed.get(item);
+    const claims = this.claimsByItem.get(item);
     return { 
-      available: quantity > 0 && !claimedBy,
-      claimedBy,
+      available: quantity > 0,
+      claimedBy: claims ? Array.from(claims.keys()) : undefined,
       quantity
     };
   }
@@ -66,27 +71,74 @@ export class InventoryAgent {
   }
 
   static claim(item: string, missionId: string) {
-    const currentClaim = this.claimed.get(item);
     const quantity = this.stock[item] || 0;
 
-    if (quantity > 0 && (!currentClaim || currentClaim === missionId)) {
-      this.claimed.set(item, missionId);
+    if (quantity > 0) {
       this.stock[item]--;
+
+      const itemClaims = this.claimsByItem.get(item) ?? new Map<string, number>();
+      itemClaims.set(missionId, (itemClaims.get(missionId) ?? 0) + 1);
+      this.claimsByItem.set(item, itemClaims);
+
+      const missionClaims = this.claimsByMission.get(missionId) ?? new Map<string, number>();
+      missionClaims.set(item, (missionClaims.get(item) ?? 0) + 1);
+      this.claimsByMission.set(missionId, missionClaims);
+
       return { success: true };
     } else {
+      const currentClaimers = this.claimsByItem.get(item);
       return { 
         success: false, 
-        claimedBy: currentClaim || (quantity <= 0 ? 'OUT_OF_STOCK' : undefined)
+        claimedBy: currentClaimers ? Array.from(currentClaimers.keys()).join(',') : 'OUT_OF_STOCK'
       };
     }
   }
 
   static release(item: string, missionId: string) {
-    if (this.claimed.get(item) === missionId) {
-      this.claimed.delete(item);
-      this.stock[item]++;
+    const itemClaims = this.claimsByItem.get(item);
+    const missionClaims = this.claimsByMission.get(missionId);
+    const itemClaimCount = itemClaims?.get(missionId) ?? 0;
+    const missionClaimCount = missionClaims?.get(item) ?? 0;
+
+    if (itemClaimCount > 0 && missionClaimCount > 0) {
+      this.stock[item] = (this.stock[item] || 0) + 1;
+
+      if (itemClaimCount === 1) itemClaims!.delete(missionId);
+      else itemClaims!.set(missionId, itemClaimCount - 1);
+      if (itemClaims && itemClaims.size === 0) this.claimsByItem.delete(item);
+
+      if (missionClaimCount === 1) missionClaims!.delete(item);
+      else missionClaims!.set(item, missionClaimCount - 1);
+      if (missionClaims && missionClaims.size === 0) this.claimsByMission.delete(missionId);
     }
     return { success: true };
+  }
+
+  static consumeMission(missionId: string) {
+    const missionClaims = this.claimsByMission.get(missionId);
+    if (!missionClaims) {
+      return { success: true, consumedItems: [] };
+    }
+
+    const consumedItems = Array.from(missionClaims.entries()).flatMap(([item, count]) =>
+      Array.from({ length: count }, () => item)
+    );
+
+    for (const [item, count] of missionClaims.entries()) {
+      const itemClaims = this.claimsByItem.get(item);
+      if (!itemClaims) continue;
+
+      const itemClaimCount = itemClaims.get(missionId) ?? 0;
+      if (itemClaimCount <= count) itemClaims.delete(missionId);
+      else itemClaims.set(missionId, itemClaimCount - count);
+
+      if (itemClaims.size === 0) {
+        this.claimsByItem.delete(item);
+      }
+    }
+
+    this.claimsByMission.delete(missionId);
+    return { success: true, consumedItems };
   }
 }
 
@@ -122,8 +174,16 @@ export const inventoryReleaseTool = new Tool({
   run: async ({ item, missionId }) => InventoryAgent.release(item, missionId)
 });
 
+export const inventoryConsumeMissionTool = new Tool({
+  name: 'consumeMission',
+  description: 'Marks all inventory reserved by a mission as consumed.',
+  inputSchema: InventoryConsumeMissionInputSchema,
+  outputSchema: InventoryConsumeMissionOutputSchema,
+  run: async ({ missionId }) => InventoryAgent.consumeMission(missionId)
+});
+
 export const inventoryAgent = new Agent({
   name: AgentType.INVENTORY,
   description: 'Manages rescue kit inventory and claims.',
-  tools: [inventoryQueryTool, inventoryCheckStockTool, inventoryClaimTool, inventoryReleaseTool]
+  tools: [inventoryQueryTool, inventoryCheckStockTool, inventoryClaimTool, inventoryReleaseTool, inventoryConsumeMissionTool]
 });

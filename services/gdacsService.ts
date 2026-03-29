@@ -23,21 +23,33 @@ export interface GDACSEvent {
 /**
  * Fetches the latest disaster events from GDACS.
  */
-export async function fetchGDACSEvents(alertLevel: string = 'red'): Promise<GDACSEvent[]> {
-  // Using the SEARCH endpoint as suggested in the documentation provided by the user
-  const url = `https://www.gdacs.org/gdacsapi/api/events/geteventlist/SEARCH?alertlevel=${alertLevel}`;
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`GDACS API error: ${response.statusText}`);
-  }
-  const data = await response.json();
-  console.log("GDACS API response:", data);
+function extractEventArray(data: unknown): GDACSEvent[] {
   if (Array.isArray(data)) return data as GDACSEvent[];
   if (data && typeof data === 'object') {
     const possibleArray = Object.values(data).find(val => Array.isArray(val));
     if (possibleArray) return possibleArray as GDACSEvent[];
   }
   return [];
+}
+
+export async function fetchGDACSEvents(alertLevels: string[] = ['red', 'orange', 'green']): Promise<GDACSEvent[]> {
+  const unique = new Map<string, GDACSEvent>();
+
+  for (const alertLevel of alertLevels) {
+    const url = `https://www.gdacs.org/gdacsapi/api/events/geteventlist/SEARCH?alertlevel=${alertLevel}`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`GDACS API error for level ${alertLevel}: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    const events = extractEventArray(data);
+    for (const event of events) {
+      unique.set(`${event.eventid}-${event.episodeid}`, event);
+    }
+  }
+
+  return Array.from(unique.values());
 }
 
 /**
@@ -50,10 +62,5 @@ export async function fetchGDACSMapFeed(): Promise<GDACSEvent[]> {
     throw new Error(`GDACS API error: ${response.statusText}`);
   }
   const data = await response.json();
-  if (Array.isArray(data)) return data as GDACSEvent[];
-  if (data && typeof data === 'object') {
-    const possibleArray = Object.values(data).find(val => Array.isArray(val));
-    if (possibleArray) return possibleArray as GDACSEvent[];
-  }
-  return [];
+  return extractEventArray(data);
 }

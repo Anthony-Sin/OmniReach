@@ -3,11 +3,13 @@ import { z } from 'zod';
 
 export enum AgentType {
   SENTINEL = 'SENTINEL',
+  INTEL = 'INTEL',
   TRIAGE = 'TRIAGE',
   ASSEMBLY = 'ASSEMBLY',
   LOGISTICS = 'LOGISTICS',
   ROBOTICS = 'ROBOTICS',
   DELIVERY = 'DELIVERY',
+  ACTION = 'ACTION',
   COORDINATOR = 'COORDINATOR',
   INVENTORY = 'INVENTORY',
 }
@@ -53,6 +55,10 @@ export const ZoneSchema = z.object({
   description: z.string().optional(),
   alertLevel: z.string().optional(),
   waypoints: z.array(z.tuple([z.number(), z.number(), z.number()])).optional(),
+  intelSummary: z.string().optional(),
+  reliefWebCount: z.number().optional(),
+  floodGaugeCount: z.number().optional(),
+  floodRiskScore: z.number().optional(),
 });
 
 export type Zone = z.infer<typeof ZoneSchema>;
@@ -73,9 +79,12 @@ export enum MissionEventType {
   ARM_EXECUTION_STARTED = 'ARM_EXECUTION_STARTED',
   ARM_EXECUTION_COMPLETED = 'ARM_EXECUTION_COMPLETED',
   DELIVERY_ROUTE_CREATED = 'DELIVERY_ROUTE_CREATED',
-  DRONE_LAUNCHED = 'DRONE_LAUNCHED',
-  DRONE_WAYPOINT_REACHED = 'DRONE_WAYPOINT_REACHED',
-  DRONE_ARRIVED = 'DRONE_ARRIVED',
+  DELIVERY_DISPATCHED = 'DELIVERY_DISPATCHED',
+  DELIVERY_WAYPOINT_REACHED = 'DELIVERY_WAYPOINT_REACHED',
+  DELIVERY_ARRIVED = 'DELIVERY_ARRIVED',
+  INCIDENT_EXPORT_CREATED = 'INCIDENT_EXPORT_CREATED',
+  PARTNER_WEBHOOK_DISPATCHED = 'PARTNER_WEBHOOK_DISPATCHED',
+  ACTION_HANDOFF_COMPLETED = 'ACTION_HANDOFF_COMPLETED',
   AUTO_DEPLOY_TRIGGERED = 'AUTO_DEPLOY_TRIGGERED',
   MISSION_COMPLETE = 'MISSION_COMPLETE',
   MISSION_FAILED = 'MISSION_FAILED',
@@ -180,6 +189,7 @@ export type PickSequenceCreatedPayload = z.infer<typeof PickSequenceCreatedPaylo
 
 export const ArmExecutionStartedPayloadSchema = z.object({
   plan: PickSequenceCreatedPayloadSchema,
+  armId: z.string(),
   startPose: z.array(z.number()),
   targetPoses: z.array(z.array(z.number())),
   safetyChecks: z.array(z.string()),
@@ -212,7 +222,8 @@ export const DeliveryRouteCreatedPayloadSchema = z.object({
 
 export type DeliveryRouteCreatedPayload = z.infer<typeof DeliveryRouteCreatedPayloadSchema>;
 
-export const DroneWaypointPayloadSchema = z.object({
+export const DeliveryTelemetryPayloadSchema = z.object({
+  transportMode: z.enum(['DRONE', 'GROUND_ROBOT', 'AIR_DROP', 'GROUND_ROVER']),
   waypointIndex: z.number(),
   totalWaypoints: z.number(),
   currentLat: z.number(),
@@ -223,7 +234,33 @@ export const DroneWaypointPayloadSchema = z.object({
   percentComplete: z.number().min(0).max(100),
 });
 
-export type DroneWaypointPayload = z.infer<typeof DroneWaypointPayloadSchema>;
+export type DeliveryTelemetryPayload = z.infer<typeof DeliveryTelemetryPayloadSchema>;
+
+export const IncidentExportPayloadSchema = z.object({
+  exportPath: z.string(),
+  partnerName: z.string(),
+  channels: z.array(z.string()),
+});
+
+export type IncidentExportPayload = z.infer<typeof IncidentExportPayloadSchema>;
+
+export const PartnerWebhookPayloadSchema = z.object({
+  targetUrl: z.string(),
+  deliveryStatus: z.enum(['DELIVERED', 'SKIPPED']),
+  partnerName: z.string(),
+  responseCode: z.number().optional(),
+});
+
+export type PartnerWebhookPayload = z.infer<typeof PartnerWebhookPayloadSchema>;
+
+export const ActionHandoffCompletedPayloadSchema = z.object({
+  exportPath: z.string(),
+  partnerName: z.string(),
+  channelsUsed: z.array(z.string()),
+  summary: z.string(),
+});
+
+export type ActionHandoffCompletedPayload = z.infer<typeof ActionHandoffCompletedPayloadSchema>;
 
 export const MissionCompletePayloadSchema = z.object({
   summary: z.string(),
@@ -280,9 +317,14 @@ export interface MissionState {
     route?: DeliveryRouteCreatedPayload;
     startTime?: number;
     retryCount?: number;
+    assignedArmId?: string;
     droneStatus?: 'IN_FLIGHT' | 'ARRIVED';
+    transportMode?: 'DRONE' | 'GROUND_ROBOT' | 'AIR_DROP' | 'GROUND_ROVER';
     dronePosition?: { lat: number; lng: number };
     dronePercent?: number;
+    exportPath?: string;
+    partnerName?: string;
+    actionChannels?: string[];
     kitSpecialization?: KitSpecialization;
   };
 }

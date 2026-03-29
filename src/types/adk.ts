@@ -1,6 +1,6 @@
 
 import { z } from 'zod';
-import { KitSpecialization, MissionPriority, ZoneSchema, KitPlanCreatedPayloadSchema, PickSequenceCreatedPayloadSchema } from './mission';
+import { KitSpecialization, MissionPriority, ZoneSchema, KitPlanCreatedPayloadSchema, PickSequenceCreatedPayloadSchema, DeliveryRouteCreatedPayloadSchema, MissionCompletePayloadSchema } from './mission';
 
 export const MissionIdSchema = z.object({
   missionId: z.string()
@@ -9,6 +9,14 @@ export const MissionIdSchema = z.object({
 export const SentinelInputSchema = MissionIdSchema;
 export const SentinelOutputSchema = z.object({
   success: z.boolean()
+});
+
+export const IntelInputSchema = z.object({
+  missionId: z.string(),
+  alerts: z.array(z.any())
+});
+export const IntelOutputSchema = z.object({
+  enrichedAlerts: z.array(z.any())
 });
 
 export const TriageInputSchema = z.object({
@@ -54,6 +62,17 @@ export const DeliveryOutputSchema = z.object({
   success: z.boolean()
 });
 
+export const ActionInputSchema = z.object({
+  missionId: z.string(),
+  zone: ZoneSchema,
+  recommendation: KitPlanCreatedPayloadSchema.optional(),
+  route: DeliveryRouteCreatedPayloadSchema.optional(),
+  completion: MissionCompletePayloadSchema,
+});
+export const ActionOutputSchema = z.object({
+  success: z.boolean()
+});
+
 export const InventoryClaimInputSchema = z.object({
   item: z.string(),
   missionId: z.string()
@@ -71,12 +90,20 @@ export const InventoryReleaseOutputSchema = z.object({
   success: z.boolean()
 });
 
+export const InventoryConsumeMissionInputSchema = z.object({
+  missionId: z.string()
+});
+export const InventoryConsumeMissionOutputSchema = z.object({
+  success: z.boolean(),
+  consumedItems: z.array(z.string())
+});
+
 export const InventoryQueryInputSchema = z.object({
   item: z.string()
 });
 export const InventoryQueryOutputSchema = z.object({
   available: z.boolean(),
-  claimedBy: z.string().optional(),
+  claimedBy: z.array(z.string()).optional(),
   quantity: z.number().optional()
 });
 

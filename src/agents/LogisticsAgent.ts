@@ -21,12 +21,13 @@ export class LogisticsAgent {
       context.agent.sendMessage(AgentType.COORDINATOR, thinkingEvent);
 
       // 0. Check stock before claiming
-      const stockCheck = await context.agent.runTool('checkStock', { items: payload.items }, { targetAgent: AgentType.INVENTORY });
+      const stockCheck = await context.agent.runTool('checkStock', { items: payload.items }, { targetAgent: AgentType.INVENTORY, queueName: 'inventory-worker' });
+      const missingItems = stockCheck?.missingItems ?? [];
       
       if (!payload.reroutedItems) payload.reroutedItems = [];
 
-      if (stockCheck.missingItems.length > 0) {
-        for (const missingItem of stockCheck.missingItems) {
+      if (missingItems.length > 0) {
+        for (const missingItem of missingItems) {
           // Logic: If critical, try to reroute. Otherwise, reduce allocation.
           if (payload.priority === 'critical') {
             console.log(`[Logistics] Decision: Rerouted to Warehouse_B due to supply shortage of ${missingItem}.`);
@@ -47,7 +48,7 @@ export class LogisticsAgent {
       for (const itemName of itemsToClaim) {
         try {
           // ADK: Use InventoryAgent tool via context
-          const result = await context.agent.runTool('claim', { item: itemName, missionId }, { targetAgent: AgentType.INVENTORY });
+          const result = await context.agent.runTool('claim', { item: itemName, missionId }, { targetAgent: AgentType.INVENTORY, queueName: 'inventory-worker' });
 
           if (result.success) {
             payload.items.push(itemName);

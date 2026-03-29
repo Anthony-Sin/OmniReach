@@ -1,6 +1,7 @@
 
 import { LlmAgent, FunctionTool, LlmAgentConfig, ToolOptions as AdkToolOptions, Context, isFunctionTool } from '@google/adk';
 import { z } from 'zod';
+import { workerQueues } from './workerQueue';
 
 const agentRegistry = new Map<string, Agent>();
 
@@ -51,7 +52,7 @@ export class Agent extends LlmAgent {
    * Invokes a tool on an agent.
    * Supports cross-agent tool invocation.
    */
-  async runTool(name: string, args: any, options?: { targetAgent?: string }) {
+  async runTool(name: string, args: any, options?: { targetAgent?: string; queueName?: string }) {
     let target: Agent = this;
     if (options?.targetAgent) {
       const found = agentRegistry.get(options.targetAgent);
@@ -72,7 +73,11 @@ export class Agent extends LlmAgent {
       } as any;
 
       try {
-        return await tool.runAsync({ args, toolContext });
+        const executeTool = () => tool.runAsync({ args, toolContext });
+        if (options?.queueName) {
+          return await workerQueues.enqueue(options.queueName, executeTool);
+        }
+        return await executeTool();
       } catch (error) {
         throw new Error(`[ADK] Tool "${name}" failed on agent "${target.name}": ${error instanceof Error ? error.message : String(error)}`);
       }

@@ -10,6 +10,7 @@ import { missionStore } from './src/lib/missionStore';
 import { MissionEventType } from './src/types/mission';
 import { MOCK_INVENTORY } from './src/lib/pickPlanner';
 import { InventoryAgent } from './src/agents/InventoryAgent';
+import { workerQueues } from './src/lib/workerQueue';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -34,6 +35,10 @@ async function startServer() {
   const unsubscribe = coordinatorAgent.onMessage((event) => {
     // Broadcast mission events to all connected clients
     io.emit('mission_event', event);
+    const mission = missionStore.getMission(event.missionId);
+    if (mission) {
+      io.emit('mission_state', mission);
+    }
   });
 
   // Handle socket connections
@@ -64,6 +69,10 @@ async function startServer() {
   // API Routes
   app.get('/api/health', (req, res) => {
     res.json({ status: 'Aegis System Online' });
+  });
+
+  app.get('/api/system/queues', (req, res) => {
+    res.json(workerQueues.snapshot());
   });
 
   // Handle supply level updates
@@ -97,6 +106,7 @@ async function startServer() {
       const mission = missionStore.getMission(missionId);
       if (mission) {
         io.emit('mission_init', mission);
+        io.emit('mission_state', mission);
       }
       
       res.json({ missionId });

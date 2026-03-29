@@ -35,6 +35,32 @@ function getSpecializationsForAlert(alert: any): KitSpecialization[] {
   return Array.from(new Set(specs));
 }
 
+function normalizeZone(alert: any) {
+  const rawType = String(alert.eventtype || alert.type || 'flood').toLowerCase();
+  const rawSeverity = String(alert.severity || 'medium').toLowerCase();
+
+  const typeMap: Record<string, 'flood' | 'earthquake' | 'conflict' | 'wildfire' | 'facility' | 'cyclone' | 'volcano' | 'drought'> = {
+    flood: 'flood',
+    earthquake: 'earthquake',
+    conflict: 'conflict',
+    wildfire: 'wildfire',
+    facility: 'facility',
+    cyclone: 'cyclone',
+    hurricane: 'cyclone',
+    typhoon: 'cyclone',
+    volcano: 'volcano',
+    drought: 'drought'
+  };
+
+  return {
+    ...alert,
+    id: alert.id ?? `gdacs-${alert.eventid ?? alert.name ?? 'zone'}`,
+    type: typeMap[rawType] ?? 'flood',
+    severity: ['low', 'medium', 'high', 'critical', 'nominal'].includes(rawSeverity) ? rawSeverity : 'medium',
+    alertLevel: alert.alertLevel ?? alert.alertlevel ?? 'green'
+  };
+}
+
 export class TriageAgent {
   static async prioritize(mission: MissionState, alerts: NormalizedAlert[], context: any) {
     const missionId = mission.id;
@@ -63,7 +89,7 @@ export class TriageAgent {
       ));
 
       // 1. Deterministic Scoring
-      const scoredAlerts = alerts.map(alert => {
+      let scoredAlerts: any[] = alerts.map(alert => {
         let score = 0;
 
         // Severity Score
@@ -89,12 +115,38 @@ export class TriageAgent {
         return { ...alert, triageScore: score, distance: dist, hasActiveMission };
       });
 
+      try {
+        const enrichment = await context.agent.runTool(
+          'enrichAlerts',
+          { missionId, alerts: scoredAlerts.slice(0, 5) },
+          { targetAgent: AgentType.INTEL, queueName: 'intel-worker' }
+        );
+
+        const enrichedByEventId = new Map<number, any>(
+          (enrichment?.enrichedAlerts ?? []).map((alert: any) => [alert.eventid, alert])
+        );
+
+        scoredAlerts = scoredAlerts.map((alert: any) => {
+          const enriched = enrichedByEventId.get(alert.eventid);
+          if (!enriched) return alert;
+
+          const reliefBoost = Math.min((enriched.reliefWebCount ?? 0) * 2, 12);
+          const floodBoost = Math.min((enriched.floodRiskScore ?? 0) * 3, 18);
+          return {
+            ...alert,
+            ...enriched,
+            triageScore: alert.triageScore + reliefBoost + floodBoost
+          };
+        });
+      } catch (e) {
+        console.warn('[TriageAgent] Failed to enrich alerts via IntelAgent:', e);
+      }
+
       // Sort by score
       const sorted = scoredAlerts.sort((a, b) => b.triageScore - a.triageScore);
       
       // 2. AI-Enhanced Reasoning
-      const topChoice = sorted[0];
-      let reasoning = `Prioritized ${topChoice.name} based on ${topChoice.severity} severity and proximity.`;
+      let reasoning = `Prioritized ${sorted[0].name} based on ${sorted[0].severity} severity and proximity.`;
       let ranked = sorted;
 
       // Gemini ranking with retry and validation (handled in geminiService)
@@ -103,7 +155,7 @@ export class TriageAgent {
       if (Array.isArray(aiResult) && aiResult.length > 0) {
         ranked = aiResult.map((aiItem: any) => {
           const original = sorted.find(s => s.eventid === aiItem.eventid);
-          return { ...original, ...aiItem };
+          return normalizeZone({ ...original, ...aiItem });
         });
         
         const aiTop = ranked[0] as any;
@@ -112,16 +164,21 @@ export class TriageAgent {
         }
       }
 
+      ranked = ranked.map(normalizeZone);
+
+      const selectedZone: any = ranked[0];
       const payload = { 
-        zone: topChoice,
+        zone: selectedZone,
         ranked, // Full list for UI
-        priorityScore: Math.min(topChoice.triageScore / 300, 1), // Normalized 0-1
+        priorityScore: Math.min((selectedZone.triageScore ?? 0) / 300, 1), // Normalized 0-1
         reason: reasoning,
-        recommendedMissionMode: topChoice.severity === 'critical' ? 'EMERGENCY' : 'STANDARD' as const,
+        recommendedMissionMode: selectedZone.severity === 'critical' ? 'EMERGENCY' : 'STANDARD' as const,
         constraints: [
-          `Distance: ${topChoice.distance.toFixed(2)} units`,
-          `Alert Level: ${topChoice.alertLevel}`,
-          topChoice.severity === 'critical' ? 'Immediate response required' : 'Standard response protocol'
+          `Distance: ${(selectedZone.distance ?? 0).toFixed(2)} km`,
+          `Alert Level: ${selectedZone.alertLevel}`,
+          selectedZone.reliefWebCount ? `ReliefWeb Reports: ${selectedZone.reliefWebCount}` : 'ReliefWeb Reports: 0',
+          selectedZone.floodGaugeCount ? `USGS Flood Gauges: ${selectedZone.floodGaugeCount}` : 'USGS Flood Gauges: 0',
+          selectedZone.severity === 'critical' ? 'Immediate response required' : 'Standard response protocol'
         ]
       };
 

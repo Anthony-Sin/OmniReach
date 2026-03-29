@@ -1,8 +1,17 @@
 {
-  "name": "robotics-pick-and-place",
+  "name": "aegis-disaster-response",
   "private": true,
   "version": "0.0.0",
+  "description": "Aegis disaster-response agent workforce that coordinates response and generates operational incident export packets for human relief teams.",
   "type": "module",
+  "keywords": [
+    "agents",
+    "disaster-response",
+    "a2a",
+    "workforce",
+    "climate",
+    "humanitarian"
+  ],
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build",

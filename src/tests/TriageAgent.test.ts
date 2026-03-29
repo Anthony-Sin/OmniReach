@@ -10,7 +10,11 @@ describe('TriageAgent', () => {
   const mockContext = {
     agent: {
       sendMessage: vi.fn(),
-      runTool: vi.fn().mockResolvedValue({ activeZoneIds: [] })
+      runTool: vi.fn().mockImplementation(async (name: string) => {
+        if (name === 'queryActiveZones') return { activeZoneIds: [] };
+        if (name === 'enrichAlerts') return { enrichedAlerts: [] };
+        return {};
+      })
     }
   };
 

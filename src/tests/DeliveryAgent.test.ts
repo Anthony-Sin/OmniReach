@@ -45,7 +45,7 @@ describe('DeliveryAgent', () => {
       type: 'DELIVERY_ROUTE_CREATED'
     }));
     expect(mockContext.agent.sendMessage).toHaveBeenCalledWith('COORDINATOR', expect.objectContaining({
-      type: 'MISSION_COMPLETE'
+      type: 'DELIVERY_ARRIVED'
     }));
   });
 

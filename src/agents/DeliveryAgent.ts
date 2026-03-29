@@ -1,7 +1,7 @@
 
 import { Agent, Tool } from '../lib/adk';
 import { createEvent } from '../lib/agentUtils';
-import { MissionEventType, DeliveryRouteCreatedPayloadSchema, MissionCompletePayloadSchema, DroneWaypointPayloadSchema, AgentType } from '../types/mission';
+import { MissionEventType, DeliveryRouteCreatedPayloadSchema, DeliveryTelemetryPayloadSchema, AgentType } from '../types/mission';
 import { RoutePlanner } from '../lib/routePlanner';
 import { generateRouteNarrative } from '../../services/geminiService';
 import { fetchWeather } from '../../services/weatherService';
@@ -10,6 +10,15 @@ import { DeliveryInputSchema, DeliveryOutputSchema } from '../types/adk';
 export class DeliveryAgent {
   static async planRoute(missionId: string, sourceZone: any, targetZone: any, context: any) {
     try {
+      if (
+        typeof sourceZone?.lat !== 'number' ||
+        typeof sourceZone?.lng !== 'number' ||
+        typeof targetZone?.lat !== 'number' ||
+        typeof targetZone?.lng !== 'number'
+      ) {
+        throw new Error('Source and target coordinates are required to plan a delivery route.');
+      }
+
       // 1. Fetch real-time weather data for environmental awareness
       const weather = await fetchWeather(targetZone.lat, targetZone.lng);
       const weatherRisk = weather.riskLevel;
@@ -124,9 +133,9 @@ export class DeliveryAgent {
     const targetLat = waypoints[totalWaypoints - 1][0];
     const targetLng = waypoints[totalWaypoints - 1][1];
 
-    const eventType = transportMode === 'DRONE' ? MissionEventType.DRONE_LAUNCHED : MissionEventType.DRONE_LAUNCHED; // Reusing for now, or could add ROVER_DEPLOYED
-    const waypointType = transportMode === 'DRONE' ? MissionEventType.DRONE_WAYPOINT_REACHED : MissionEventType.DRONE_WAYPOINT_REACHED;
-    const arrivedType = transportMode === 'DRONE' ? MissionEventType.DRONE_ARRIVED : MissionEventType.DRONE_ARRIVED;
+    const eventType = MissionEventType.DELIVERY_DISPATCHED;
+    const waypointType = MissionEventType.DELIVERY_WAYPOINT_REACHED;
+    const arrivedType = MissionEventType.DELIVERY_ARRIVED;
 
     // 1. Emits LAUNCHED immediately
     const launchedEvent = createEvent(
@@ -134,6 +143,7 @@ export class DeliveryAgent {
       AgentType.DELIVERY,
       eventType,
       {
+        transportMode: transportMode as 'DRONE' | 'GROUND_ROBOT' | 'AIR_DROP' | 'GROUND_ROVER',
         waypointIndex: 0,
         totalWaypoints,
         currentLat: waypoints[0][0],
@@ -153,6 +163,7 @@ export class DeliveryAgent {
       await new Promise(resolve => setTimeout(resolve, Math.min(delay, 2000))); 
 
       const payload = {
+        transportMode: transportMode as 'DRONE' | 'GROUND_ROBOT' | 'AIR_DROP' | 'GROUND_ROVER',
         waypointIndex: i,
         totalWaypoints,
         currentLat: waypoints[i][0],
@@ -164,7 +175,7 @@ export class DeliveryAgent {
       };
 
       // Validate payload
-      DroneWaypointPayloadSchema.parse(payload);
+      DeliveryTelemetryPayloadSchema.parse(payload);
 
       const reachedEvent = createEvent(
         missionId,
@@ -182,6 +193,7 @@ export class DeliveryAgent {
       AgentType.DELIVERY,
       arrivedType,
       {
+        transportMode: transportMode as 'DRONE' | 'GROUND_ROBOT' | 'AIR_DROP' | 'GROUND_ROVER',
         waypointIndex: totalWaypoints - 1,
         totalWaypoints,
         currentLat: targetLat,
@@ -195,23 +207,8 @@ export class DeliveryAgent {
     );
     context.agent.sendMessage(AgentType.COORDINATOR, arrivedEvent);
 
-    // 4. Emit MISSION_COMPLETE
-    const completionPayload = { 
-      summary: `Kit delivered successfully to ${targetZone.name} via ${transportMode}.`,
-      timestamps: { start: deliveryStartTime, end: Date.now() },
-      successMetrics: { accuracy: 1.0, speed: transportMode === 'DRONE' ? 0.95 : 0.7, safety: 1.0 }
-    };
-
-    MissionCompletePayloadSchema.parse(completionPayload);
-
-    const completeEvent = createEvent(
-      missionId,
-      AgentType.DELIVERY,
-      MissionEventType.MISSION_COMPLETE,
-      completionPayload,
-      { rationale: `${transportMode} has reached the destination and dropped the payload.` }
-    );
-    context.agent.sendMessage(AgentType.COORDINATOR, completeEvent);
+    // Final mission completion is owned by ActionAgent after export/webhook handoff.
+    // Delivery stops at arrival so downstream action work cannot be skipped by a race.
   }
 }
 

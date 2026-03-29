@@ -1,14 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { CoordinatorAgent } from '../agents/CoordinatorAgent';
+import { CoordinatorAgent, coordinatorAgent } from '../agents/CoordinatorAgent';
 import { MissionEventType, MissionProgress, AgentType } from '../types/mission';
-import { TriageAgent } from '../agents/TriageAgent';
 import { missionStore } from '../lib/missionStore';
-
-vi.mock('../agents/TriageAgent', () => ({
-  TriageAgent: {
-    prioritize: vi.fn(),
-  },
-}));
 
 describe('CoordinatorAgent', () => {
   beforeEach(() => {
@@ -19,6 +12,7 @@ describe('CoordinatorAgent', () => {
   });
 
   it('should handle ALERT_DETECTED and trigger TriageAgent', async () => {
+    const runToolSpy = vi.spyOn(coordinatorAgent, 'runTool').mockResolvedValue({ success: true } as any);
     const mockEvent = {
       missionId: 'mission-1',
       agentId: 'SENTINEL',
@@ -39,10 +33,15 @@ describe('CoordinatorAgent', () => {
 
     await (CoordinatorAgent as any).handleEvent(mockEvent);
 
-    expect(TriageAgent.prioritize).toHaveBeenCalled();
+    expect(runToolSpy).toHaveBeenCalledWith(
+      'prioritize',
+      expect.objectContaining({ missionId: 'mission-1' }),
+      { targetAgent: AgentType.TRIAGE, queueName: 'triage-worker' }
+    );
   });
 
   it('should prevent duplicate processing of same event', async () => {
+    const runToolSpy = vi.spyOn(coordinatorAgent, 'runTool').mockResolvedValue({ success: true } as any);
     const mockEvent = {
       missionId: 'mission-1',
       agentId: 'SENTINEL',
@@ -64,6 +63,6 @@ describe('CoordinatorAgent', () => {
     await (CoordinatorAgent as any).handleEvent(mockEvent);
     await (CoordinatorAgent as any).handleEvent(mockEvent);
 
-    expect(TriageAgent.prioritize).toHaveBeenCalledTimes(1);
+    expect(runToolSpy).toHaveBeenCalledTimes(1);
   });
 });

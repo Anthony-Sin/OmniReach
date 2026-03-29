@@ -17,8 +17,7 @@ export async function fetchWeather(lat: number, lng: number): Promise<WeatherDat
     const url = new URL('https://api.open-meteo.com/v1/forecast');
     url.searchParams.append('latitude', lat.toString());
     url.searchParams.append('longitude', lng.toString());
-    url.searchParams.append('current_weather', 'true');
-    url.searchParams.append('hourly', 'precipitation');
+    url.searchParams.append('current', 'temperature_2m,wind_speed_10m,precipitation,weather_code');
 
     const response = await fetch(url.toString());
     if (!response.ok) {
@@ -26,15 +25,17 @@ export async function fetchWeather(lat: number, lng: number): Promise<WeatherDat
     }
     const data = await response.json();
 
-    const current = data.current_weather;
-    const hourly = data.hourly;
+    const current = data.current;
+    if (!current) {
+      throw new Error('Weather API returned no current observation block.');
+    }
     
     // Simple risk calculation
     // Wind speed > 30 km/h is high risk for drones
     // Precipitation > 2mm/h is high risk
     
-    const windSpeed = current.windspeed;
-    const precipitation = hourly.precipitation[0] || 0;
+    const windSpeed = current.wind_speed_10m ?? 0;
+    const precipitation = current.precipitation ?? 0;
     
     // Risk level 1-10
     // Wind: 0-50 km/h -> 1-5
@@ -44,23 +45,23 @@ export async function fetchWeather(lat: number, lng: number): Promise<WeatherDat
     const riskLevel = windRisk + precipRisk;
     
     return {
-      temperature: current.temperature,
-      windSpeed: current.windspeed,
+      temperature: current.temperature_2m ?? 20,
+      windSpeed,
       precipitation,
-      weatherCode: current.weathercode,
+      weatherCode: current.weather_code ?? 0,
       riskLevel,
       isHighRisk: riskLevel >= 7
     };
   } catch (error) {
     console.error('Error fetching weather data:', error);
-    // Default to safe weather if API fails, but log it
+    // Fail closed when weather is unavailable so autonomous delivery stays cautious.
     return {
-      temperature: 20,
-      windSpeed: 5,
-      precipitation: 0,
-      weatherCode: 0,
-      riskLevel: 1,
-      isHighRisk: false
+      temperature: 0,
+      windSpeed: 60,
+      precipitation: 10,
+      weatherCode: -1,
+      riskLevel: 10,
+      isHighRisk: true
     };
   }
 }

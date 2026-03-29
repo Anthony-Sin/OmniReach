@@ -2,12 +2,14 @@
 import { Agent, Tool } from '../lib/adk';
 import { MissionEvent, MissionState, MissionProgress, MissionEventType, MissionQueueEntry, KitSpecialization, MissionPriority, AgentRequestType, AgentRequestEvent, AgentType } from '../types/mission';
 import { sentinelAgent } from './SentinelAgent';
+import { intelAgent } from './IntelAgent';
 import { triageAgent } from './TriageAgent';
 import { assemblyAgent } from './AssemblyAgent';
 import { logisticsAgent } from './LogisticsAgent';
 import { roboticsAgent } from './RoboticsAgent';
 import { deliveryAgent } from './DeliveryAgent';
 import { inventoryAgent } from './InventoryAgent';
+import { actionAgent } from './ActionAgent';
 import { appendMissionHistory, createEventId, createEvent } from '../lib/agentUtils';
 import { generateMissionSummary } from '../../services/geminiService';
 import { missionStore } from '../lib/missionStore';
@@ -23,9 +25,12 @@ const EVENT_ORDER = [
   MissionEventType.ARM_EXECUTION_COMPLETED,
   MissionEventType.DELIVERY_ROUTE_CREATED,
   MissionEventType.DELIVERY_DELAYED_WEATHER,
-  MissionEventType.DRONE_LAUNCHED,
-  MissionEventType.DRONE_WAYPOINT_REACHED,
-  MissionEventType.DRONE_ARRIVED,
+  MissionEventType.DELIVERY_DISPATCHED,
+  MissionEventType.DELIVERY_WAYPOINT_REACHED,
+  MissionEventType.DELIVERY_ARRIVED,
+  MissionEventType.INCIDENT_EXPORT_CREATED,
+  MissionEventType.PARTNER_WEBHOOK_DISPATCHED,
+  MissionEventType.ACTION_HANDOFF_COMPLETED,
   MissionEventType.MISSION_COMPLETE
 ];
 
@@ -34,6 +39,15 @@ export class CoordinatorAgentClass {
   private static queue: MissionQueueEntry[] = [];
   private static pending_queue: { missionId: string, severity: string, alerts: any[] }[] = [];
   private static maxConcurrent = 3;
+
+  private static isRepeatableEvent(type: MissionEventType) {
+    return [
+      MissionEventType.AGENT_THINKING,
+      MissionEventType.AGENT_WAITING,
+      MissionEventType.ROBOT_ARM_STATUS,
+      MissionEventType.DELIVERY_WAYPOINT_REACHED
+    ].includes(type);
+  }
 
   static init() {
     if (this._unsubscribe) this._unsubscribe();
@@ -84,7 +98,7 @@ export class CoordinatorAgentClass {
     }, MISSION_TIMEOUT_MS);
 
     // Kick off the pipeline via ADK
-    await coordinatorAgent.runTool('startMonitoring', { missionId }, { targetAgent: AgentType.SENTINEL });
+    await coordinatorAgent.runTool('startMonitoring', { missionId }, { targetAgent: AgentType.SENTINEL, queueName: 'sentinel-observer' });
     return missionId;
   }
 
@@ -122,7 +136,7 @@ export class CoordinatorAgentClass {
       const mission = missionStore.getMission(next.missionId)!;
       mission.progress = MissionProgress.MONITORING;
       missionStore.setMission(next.missionId, mission);
-      coordinatorAgent.runTool('startMonitoring', { missionId: next.missionId }, { targetAgent: AgentType.SENTINEL });
+      coordinatorAgent.runTool('startMonitoring', { missionId: next.missionId }, { targetAgent: AgentType.SENTINEL, queueName: 'sentinel-observer' });
     }
 
     this.dispatchNext();
@@ -167,7 +181,7 @@ export class CoordinatorAgentClass {
       mission.progress = MissionProgress.TRIAGING;
       mission.currentStep = AgentType.TRIAGE;
       missionStore.setMission(next.missionId, mission);
-      await coordinatorAgent.runTool('prioritize', { missionId: next.missionId, alerts: next.alerts }, { targetAgent: AgentType.TRIAGE });
+      await coordinatorAgent.runTool('prioritize', { missionId: next.missionId, alerts: next.alerts }, { targetAgent: AgentType.TRIAGE, queueName: 'triage-worker' });
     }
   }
 
@@ -181,13 +195,10 @@ export class CoordinatorAgentClass {
       return;
     }
 
-    const isStatusEvent = 
-      event.type === MissionEventType.AGENT_THINKING || 
-      event.type === MissionEventType.AGENT_WAITING ||
-      event.type === MissionEventType.ROBOT_ARM_STATUS;
+    const isStatusEvent = this.isRepeatableEvent(event.type);
     
     const existingEvent = mission.events.find(e => e.type === event.type);
-    if (existingEvent && event.status !== 'RETRYING' && !isStatusEvent) {
+    if (existingEvent && event.status !== 'RETRYING' && !this.isRepeatableEvent(event.type)) {
       console.log(`[Coordinator] Idempotency check: Event ${event.type} already processed for mission ${event.missionId}`);
       return;
     }
@@ -252,7 +263,7 @@ export class CoordinatorAgentClass {
         mission.progress = MissionProgress.RETRYING;
         mission.data.retryCount = 1;
         missionStore.setMission(event.missionId, mission);
-        setTimeout(() => coordinatorAgent.runTool('startMonitoring', { missionId: event.missionId }, { targetAgent: AgentType.SENTINEL }), 3000);
+        setTimeout(() => coordinatorAgent.runTool('startMonitoring', { missionId: event.missionId }, { targetAgent: AgentType.SENTINEL, queueName: 'sentinel-observer' }), 3000);
         return;
       }
 
@@ -299,25 +310,26 @@ export class CoordinatorAgentClass {
           zone: event.payload.zone,
           specialization: mission.data.kitSpecialization,
           constraints: event.payload.constraints?.join(', ')
-        }, { targetAgent: AgentType.ASSEMBLY });
+        }, { targetAgent: AgentType.ASSEMBLY, queueName: 'assembly-worker' });
         break;
 
       case MissionEventType.KIT_PLAN_CREATED:
         mission.data.recommendation = event.payload;
         mission.progress = MissionProgress.SEQUENCING;
         mission.currentStep = AgentType.LOGISTICS;
-        await coordinatorAgent.runTool('createPickSequence', { missionId: event.missionId, recommendation: event.payload }, { targetAgent: AgentType.LOGISTICS });
+        await coordinatorAgent.runTool('createPickSequence', { missionId: event.missionId, recommendation: event.payload }, { targetAgent: AgentType.LOGISTICS, queueName: 'logistics-worker' });
         break;
 
       case MissionEventType.PICK_SEQUENCE_CREATED:
         mission.data.pickSequence = event.payload.steps;
         mission.progress = MissionProgress.EXECUTING;
         mission.currentStep = AgentType.ROBOTICS;
-        await coordinatorAgent.runTool('execute', { missionId: event.missionId, pickSequence: event.payload }, { targetAgent: AgentType.ROBOTICS });
+        await coordinatorAgent.runTool('execute', { missionId: event.missionId, pickSequence: event.payload }, { targetAgent: AgentType.ROBOTICS, queueName: 'robotics-worker' });
         break;
 
       case MissionEventType.ARM_EXECUTION_STARTED:
         mission.data.executionStatus = 'EXECUTING';
+        mission.data.assignedArmId = event.payload.armId;
         break;
 
       case MissionEventType.ARM_EXECUTION_COMPLETED:
@@ -329,12 +341,13 @@ export class CoordinatorAgentClass {
             missionId: event.missionId,
             start: FACILITY_LOCATION,
             end: mission.data.selectedZone
-          }, { targetAgent: AgentType.DELIVERY });
+          }, { targetAgent: AgentType.DELIVERY, queueName: 'delivery-worker' });
         }
         break;
 
       case MissionEventType.DELIVERY_ROUTE_CREATED:
         mission.data.route = event.payload;
+        mission.data.transportMode = event.payload.transportMode;
         break;
       
       case MissionEventType.DELIVERY_DELAYED_WEATHER:
@@ -344,15 +357,17 @@ export class CoordinatorAgentClass {
         this.drainQueue();
         break;
 
-      case MissionEventType.DRONE_LAUNCHED:
+      case MissionEventType.DELIVERY_DISPATCHED:
         mission.data.droneStatus = 'IN_FLIGHT';
+        mission.data.transportMode = event.payload.transportMode;
         mission.data.dronePosition = {
           lat: event.payload.currentLat,
           lng: event.payload.currentLng,
         };
         break;
 
-      case MissionEventType.DRONE_WAYPOINT_REACHED:
+      case MissionEventType.DELIVERY_WAYPOINT_REACHED:
+        mission.data.transportMode = event.payload.transportMode;
         mission.data.dronePosition = {
           lat: event.payload.currentLat,
           lng: event.payload.currentLng,
@@ -360,13 +375,43 @@ export class CoordinatorAgentClass {
         mission.data.dronePercent = event.payload.percentComplete;
         break;
 
-      case MissionEventType.DRONE_ARRIVED:
+      case MissionEventType.DELIVERY_ARRIVED:
         mission.data.droneStatus = 'ARRIVED';
+        mission.data.transportMode = event.payload.transportMode;
         mission.data.dronePercent = 100;
+        mission.currentStep = AgentType.ACTION;
+        await coordinatorAgent.runTool('handoff', {
+          missionId: event.missionId,
+          zone: mission.data.selectedZone,
+          recommendation: mission.data.recommendation,
+          route: mission.data.route,
+          completion: {
+            summary: `Relief assets reached ${mission.data.selectedZone?.name || 'target zone'} via ${mission.data.transportMode || event.payload.transportMode}.`,
+            timestamps: { start: mission.data.startTime || Date.now(), end: Date.now() },
+            successMetrics: { accuracy: 1, speed: 1, safety: 1 }
+          }
+        }, { targetAgent: AgentType.ACTION, queueName: 'action-worker' });
+        break;
+
+      case MissionEventType.INCIDENT_EXPORT_CREATED:
+        mission.data.exportPath = event.payload.exportPath;
+        mission.data.partnerName = event.payload.partnerName;
+        mission.data.actionChannels = event.payload.channels;
+        break;
+
+      case MissionEventType.PARTNER_WEBHOOK_DISPATCHED:
+        mission.data.partnerName = event.payload.partnerName;
+        mission.data.actionChannels = [...new Set([...(mission.data.actionChannels || []), 'PARTNER_WEBHOOK'])];
+        break;
+
+      case MissionEventType.ACTION_HANDOFF_COMPLETED:
+        mission.data.exportPath = event.payload.exportPath;
+        mission.data.partnerName = event.payload.partnerName;
+        mission.data.actionChannels = event.payload.channelsUsed;
         break;
 
       case MissionEventType.MISSION_COMPLETE:
-        await this.releaseInventory(mission);
+        await this.consumeInventory(mission);
         this.drainQueue();
         break;
     }
@@ -378,10 +423,22 @@ export class CoordinatorAgentClass {
       console.log(`[Coordinator] Releasing inventory for mission ${mission.id}...`);
       for (const item of items) {
         try {
-          await coordinatorAgent.runTool('release', { item, missionId: mission.id }, { targetAgent: AgentType.INVENTORY });
+          await coordinatorAgent.runTool('release', { item, missionId: mission.id }, { targetAgent: AgentType.INVENTORY, queueName: 'inventory-worker' });
         } catch (err) {
           console.error(`[Coordinator] Failed to release item ${item}:`, err);
         }
+      }
+    }
+  }
+
+  private static async consumeInventory(mission: MissionState) {
+    const items = mission.data.recommendation?.items;
+    if (items && items.length > 0) {
+      console.log(`[Coordinator] Consuming inventory for mission ${mission.id}...`);
+      try {
+        await coordinatorAgent.runTool('consumeMission', { missionId: mission.id }, { targetAgent: AgentType.INVENTORY, queueName: 'inventory-worker' });
+      } catch (err) {
+        console.error(`[Coordinator] Failed to consume inventory for mission ${mission.id}:`, err);
       }
     }
   }
@@ -433,11 +490,13 @@ export const coordinatorAgent = new Agent({
   tools: [coordinatorTool, queryActiveZonesTool],
   subAgents: [
     sentinelAgent,
+    intelAgent,
     triageAgent,
     assemblyAgent,
     logisticsAgent,
     roboticsAgent,
     deliveryAgent,
+    actionAgent,
     inventoryAgent
   ]
 });

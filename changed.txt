@@ -1,0 +1,329 @@
+Changed Files Log
+
+1. /C:/Users/antho/Downloads/OmniReach/changed.txt
+What: Created the running change log requested by the user.
+Why: Record every file change, including minor edits, with purpose and rationale.
+
+2. /C:/Users/antho/Downloads/OmniReach/src/types/mission.ts
+What: Replaced drone-only delivery event names with transport-agnostic delivery events, added `armId` to robotic execution start payloads, renamed the delivery telemetry schema, and extended mission state with `assignedArmId` and `transportMode`.
+Why: Support correct rover-vs-drone semantics and track the real assigned robotic arm end to end.
+
+3. /C:/Users/antho/Downloads/OmniReach/src/types/adk.ts
+What: Added inventory consume-mission schemas and updated inventory query output to allow multiple claimers.
+Why: The inventory agent now needs to support concurrent reservations and mission-level consumption after successful delivery.
+
+4. /C:/Users/antho/Downloads/OmniReach/src/agents/InventoryAgent.ts
+What: Reworked inventory claims to track per-item and per-mission reservation counts, reset claims when supply levels change, and added `consumeMission` for successful deliveries.
+Why: Multiple missions must be able to reserve the same SKU until stock reaches zero, and successful missions should consume inventory instead of putting it back.
+
+5. /C:/Users/antho/Downloads/OmniReach/services/gdacsService.ts
+What: Expanded GDACS ingestion to merge multiple alert levels and extracted shared response parsing.
+Why: Sentinel should observe more than only red alerts and avoid making the observation layer artificially narrow.
+
+6. /C:/Users/antho/Downloads/OmniReach/services/weatherService.ts
+What: Switched weather reads to current observations and changed API-failure fallback to high risk instead of safe conditions.
+Why: Delivery decisions should become more cautious, not more optimistic, when live weather data is missing.
+
+7. /C:/Users/antho/Downloads/OmniReach/src/agents/SentinelAgent.ts
+What: Expanded Sentinel monitoring to request multiple GDACS alert levels and removed the stale-snapshot replay path for new missions.
+Why: Observation should be broader and should not silently reuse old global incidents in a misleading way.
+
+8. /C:/Users/antho/Downloads/OmniReach/src/agents/TriageAgent.ts
+What: Changed triage payload creation so the emitted selected zone always comes from the final ranked list shown to the UI.
+Why: The system should present and execute the same top-ranked zone instead of showing one result and deploying another.
+
+9. /C:/Users/antho/Downloads/OmniReach/src/agents/RoboticsAgent.ts
+What: Added the assigned `armId` to the robotics start event payload.
+Why: The frontend and coordinator need the actual assigned arm to complete and release the correct robot.
+
+10. /C:/Users/antho/Downloads/OmniReach/src/agents/DeliveryAgent.ts
+What: Replaced drone-specific progress events with transport-agnostic delivery events and included `transportMode` in live telemetry.
+Why: Rover deliveries should no longer pretend to be drone flights.
+
+11. /C:/Users/antho/Downloads/OmniReach/src/agents/CoordinatorAgent.ts
+What: Updated the coordinator state machine to use generic delivery events, record the assigned robotic arm, persist transport mode, and consume inventory on success while only releasing on failure.
+Why: The coordinator should remain the authoritative mission state owner and apply correct inventory and delivery semantics.
+
+12. /C:/Users/antho/Downloads/OmniReach/server.ts
+What: Added `mission_state` broadcasts whenever the coordinator processes an event and when a mission starts.
+Why: The frontend should synchronize from server-owned mission state instead of mutating mission state locally from raw events.
+
+13. /C:/Users/antho/Downloads/OmniReach/App.tsx
+What: Removed frontend mission-state mutation from raw events, added `mission_state` synchronization, switched delivery progress handling to generic delivery events, reused `handleStartMission`, and completed robotics with the actual assigned arm id.
+Why: The coordinator should stay the single source of truth, and the UI must track the correct transport and robot state.
+
+14. /C:/Users/antho/Downloads/OmniReach/package.json
+What: Renamed the package from the leftover template name to `aegis-disaster-response`.
+Why: The project metadata should match the actual disaster-response workforce being built.
+
+15. /C:/Users/antho/Downloads/OmniReach/README.md
+What: Replaced the template README with project-specific framing and an accurate summary of the agent workforce.
+Why: The repo presentation should clearly explain the system-of-agents purpose instead of looking like a starter app.
+
+16. /C:/Users/antho/Downloads/OmniReach/src/agents/CoordinatorAgent.ts
+What: Allowed repeatable delivery waypoint events to pass through coordinator idempotency checks.
+Why: Delivery progress telemetry should not be collapsed after the first waypoint.
+
+17. /C:/Users/antho/Downloads/OmniReach/App.tsx
+What: Added a guard that prevents the browser from sending `robotics_complete` without a real assigned arm id.
+Why: Prevents a bad completion event from releasing the wrong arm or corrupting robotics state.
+
+18. /C:/Users/antho/Downloads/OmniReach/package-lock.json
+What: Updated the lockfile package name to match the new `aegis-disaster-response` package metadata.
+Why: Keeps the package manifest and lockfile consistent after removing the old template name.
+
+19. /C:/Users/antho/Downloads/OmniReach/App.tsx
+What: Added a mission resync effect when `currentMissionId` changes.
+Why: Prevents the UI from missing the initial mission snapshot if the server broadcasts state before the client stores the mission id locally.
+
+20. /C:/Users/antho/Downloads/OmniReach/src/agents/TriageAgent.ts
+What: Added zone normalization for partial AI ranking outputs so ranked zones always satisfy the shared zone schema.
+Why: Triage should stay stable even when the AI returns incomplete fields.
+
+21. /C:/Users/antho/Downloads/OmniReach/src/agents/LogisticsAgent.ts
+What: Added safe defaults around inventory stock-check responses before reroute logic runs.
+Why: Logistics should not crash when a mocked or partial inventory response omits `missingItems`.
+
+22. /C:/Users/antho/Downloads/OmniReach/src/agents/DeliveryAgent.ts
+What: Added explicit source/target coordinate validation before weather and route planning.
+Why: Invalid route inputs should fail clearly as mission errors instead of falling into misleading weather-delay behavior.
+
+23. /C:/Users/antho/Downloads/OmniReach/src/tests/CoordinatorAgent.test.ts
+What: Reworked the coordinator test to spy on `coordinatorAgent.runTool` instead of mocking away the registered triage agent module.
+Why: The test now matches the actual coordinator orchestration path without breaking agent registration.
+
+24. /C:/Users/antho/Downloads/OmniReach/src/tests/Integration.test.ts
+What: Replaced the full robotics module mock with a spy on `RoboticsAgent.execute` and updated the mocked kit payload to satisfy the current schemas.
+Why: The integration test now preserves the real agent wiring while still forcing deterministic robotics completion.
+
+25. /C:/Users/antho/Downloads/OmniReach/src/tests/Integration.test.ts
+What: Mocked weather in the integration test and increased the settle delay before assertions.
+Why: Keeps the end-to-end mission test deterministic so delivery events can complete inside the test run.
+
+26. /C:/Users/antho/Downloads/OmniReach/src/types/mission.ts
+What: Added action-stage agent and event types plus payload schemas for incident exports, partner webhooks, and completed handoffs.
+Why: The system now needs a real outward action stage after delivery, not just simulation.
+
+27. /C:/Users/antho/Downloads/OmniReach/src/types/adk.ts
+What: Added the Action agent input/output schemas.
+Why: The new outward-action worker needs validated contracts in the A2A layer.
+
+28. /C:/Users/antho/Downloads/OmniReach/src/lib/workerQueue.ts
+What: Created a lightweight worker-queue manager for serialized queue-based stage boundaries.
+Why: This models separately deployable workers more clearly than direct in-process calls.
+
+29. /C:/Users/antho/Downloads/OmniReach/src/lib/adk.ts
+What: Extended cross-agent tool execution to optionally run through named worker queues.
+Why: Coordinator dispatch can now reflect explicit worker boundaries in the A2A runtime.
+
+30. /C:/Users/antho/Downloads/OmniReach/services/actionService.ts
+What: Added incident-export and partner-webhook service helpers for the real outward action layer.
+Why: The system now needs to export handoff packets and optionally notify external partners after delivery.
+
+31. /C:/Users/antho/Downloads/OmniReach/src/agents/ActionAgent.ts
+What: Added a new Action agent that creates incident exports, optionally dispatches partner webhooks, and reports completed handoffs back to the coordinator.
+Why: This turns the system from simulation-only into a workforce that can actually hand off work outside the app.
+
+32. /C:/Users/antho/Downloads/OmniReach/src/agents/CoordinatorAgent.ts
+What: Wired in the Action agent, expanded event ordering for outward-action events, and routed stage transitions through named worker queues.
+Why: The coordinator now models queue-based worker boundaries and ends missions through a real act layer instead of stopping at delivery simulation.
+
+38. /C:/Users/antho/Downloads/OmniReach/src/agents/ActionAgent.ts
+What: Made the Action agent emit the final `MISSION_COMPLETE` event after handoff completion.
+Why: The final mission completion now stays visible in the normal A2A event stream instead of being hidden inside coordinator-local logic.
+
+39. /C:/Users/antho/Downloads/OmniReach/src/agents/CoordinatorAgent.ts
+What: Simplified the action-handoff branch so the coordinator records handoff metadata and waits for the Action agent’s published completion event.
+Why: Final mission completion should come from the outward-action worker, not from a hidden internal branch.
+
+40. /C:/Users/antho/Downloads/OmniReach/src/tests/Integration.test.ts
+What: Mocked the new action service and extended the end-to-end assertion set for incident export and action handoff events.
+Why: The integration test now verifies the real act layer as part of the mission chain.
+
+41. /C:/Users/antho/Downloads/OmniReach/src/tests/CoordinatorAgent.test.ts
+What: Updated the coordinator dispatch assertion to include the triage worker queue boundary.
+Why: The test should reflect the new queue-based orchestration model.
+
+33. /C:/Users/antho/Downloads/OmniReach/src/agents/LogisticsAgent.ts
+What: Routed inventory checks and claims through the named inventory worker queue.
+Why: Resource allocation now respects the same queue-based worker boundary model as the other stages.
+
+34. /C:/Users/antho/Downloads/OmniReach/package.json
+What: Added package metadata that frames Aegis as a disaster-response agent workforce.
+Why: The package metadata should reinforce the multi-agent system identity, not just the app name.
+
+35. /C:/Users/antho/Downloads/OmniReach/README.md
+What: Rewrote the README around the workforce model, queue-based boundaries, and the new real act layer.
+Why: The repository should explain Aegis as an autonomous system of action rather than a generic demo app.
+
+36. /C:/Users/antho/Downloads/OmniReach/.env.example
+What: Added optional environment variables for partner webhook dispatch and incident outbox configuration.
+Why: Operators need a clear place to configure the new outward action layer.
+
+37. /C:/Users/antho/Downloads/OmniReach/server.ts
+What: Added a queue snapshot API endpoint and imported the worker queue manager.
+Why: The modeled worker boundaries are stronger when they are inspectable at runtime.
+
+42. /C:/Users/antho/Downloads/OmniReach/README.md
+What: Added the hackathon-ready incident export packet messaging and shifted the act-layer copy toward human operational handoff.
+Why: This wording better highlights the strongest demo story for judges: agent coordination that produces a field-ready human handoff artifact.
+
+43. /C:/Users/antho/Downloads/OmniReach/package.json
+What: Refined the package description to emphasize operational incident export packets for human relief teams.
+Why: The metadata should match the project’s strongest hackathon positioning.
+
+44. /C:/Users/antho/Downloads/OmniReach/src/types/mission.ts
+What: Added the `INTEL` worker role and optional zone enrichment fields for ReliefWeb and USGS flood context.
+Why: External humanitarian and flood data now need a typed place in the A2A mission model.
+
+45. /C:/Users/antho/Downloads/OmniReach/src/types/adk.ts
+What: Added ADK schemas for an intelligence-enrichment worker.
+Why: ReliefWeb and USGS data should flow through the same validated agent contracts as the rest of the system.
+
+46. /C:/Users/antho/Downloads/OmniReach/services/reliefWebService.ts
+What: Added ReliefWeb report lookup support for humanitarian context enrichment.
+Why: Triage can now consider real humanitarian reporting volume and context instead of relying only on disaster feed metadata.
+
+47. /C:/Users/antho/Downloads/OmniReach/services/usgsFloodService.ts
+What: Added USGS water-observation lookup support for flood-related enrichment.
+Why: Flood and storm missions now have an external water-data signal that can influence prioritization.
+
+48. /C:/Users/antho/Downloads/OmniReach/src/agents/IntelAgent.ts
+What: Added an ADK-connected intelligence worker that enriches alerts with ReliefWeb and USGS context.
+Why: The new outside-data integrations now work through the agent network instead of as hidden local helper calls.
+
+49. /C:/Users/antho/Downloads/OmniReach/src/agents/TriageAgent.ts
+What: Routed top alerts through the Intel worker over ADK, merged ReliefWeb and USGS enrichment into scoring, and exposed the resulting context in mission constraints.
+Why: External humanitarian and flood data now materially influence prioritization instead of being passive metadata.
+
+50. /C:/Users/antho/Downloads/OmniReach/src/agents/CoordinatorAgent.ts
+What: Registered the Intel worker as part of the coordinator’s managed agent workforce.
+Why: The enrichment stage now participates explicitly in the multi-agent ecosystem.
+
+51. /C:/Users/antho/Downloads/OmniReach/README.md
+What: Added the Intel worker and `intel-worker` queue lane to the workforce documentation.
+Why: The docs should show that ReliefWeb and USGS data enter through a real A2A enrichment stage.
+
+52. /C:/Users/antho/Downloads/OmniReach/src/tests/TriageAgent.test.ts
+What: Updated the triage test harness to mock both coordinator and Intel worker tool calls.
+Why: Triage now enriches alerts through ADK before ranking them.
+
+53. /C:/Users/antho/Downloads/OmniReach/src/tests/Integration.test.ts
+What: Mocked ReliefWeb and USGS enrichment services in the end-to-end integration test.
+Why: The mission chain now includes external-data enrichment and needs deterministic test inputs.
+
+54. /C:/Users/antho/Downloads/OmniReach/src/agents/TriageAgent.ts
+What: Tightened the triage enrichment typing so the new ReliefWeb and USGS fields satisfy TypeScript.
+Why: The external-data enrichment path was working at runtime but needed explicit typing for lint to pass.
+
+55. /C:/Users/antho/Downloads/OmniReach/src/assets/items/hydration.ts
+What: Reworked the water bottle and water filter to use more realistic everyday proportions, clearer plastic, softer consumer colors, and normal-looking label/cap details.
+Why: The hydration props were reading as oversized stylized blue objects instead of common retail water items.
+
+56. /C:/Users/antho/Downloads/OmniReach/src/assets/items/medical.ts
+What: Refined the EpiPen, wound dressing, and antibiotic box with more believable medical packaging colors, cleaner scale, and more natural label/window placement.
+Why: The medical items looked off and needed to resemble ordinary real-world first-aid and pharmacy supplies.
+
+57. /C:/Users/antho/Downloads/OmniReach/src/assets/items/nutrition.ts
+What: Toned down the MRE and ORS sachet colors, tightened their size, and refreshed the label treatment to look like standard packaged nutrition items.
+Why: The food and hydration consumables needed less game-like saturation and more realistic packaging.
+
+58. /C:/Users/antho/Downloads/OmniReach/src/assets/items/ppe.ts
+What: Scaled the N95 mask and hard hat closer to common PPE dimensions and adjusted colors/trim so they read as typical safety gear.
+Why: The PPE assets were oversized and visually louder than the rest of the item set.
+
+59. /C:/Users/antho/Downloads/OmniReach/src/assets/items/equipment.ts
+What: Updated the CAT tourniquet, duct tape, radio, emergency blanket, and tarp with more grounded colors, smaller dimensions where needed, and more ordinary retail/emergency styling.
+Why: Several equipment props were too large or too saturated and didn’t match normal field gear.
+
+60. /C:/Users/antho/Downloads/OmniReach/src/assets/items/tools.ts
+What: Normalized the multitool, flashlight, compass, and walkie-talkie with more realistic scale, darker neutral finishes, and subtler display/label accents.
+Why: The tool assets needed to feel like practical consumer hardware instead of exaggerated prop versions.
+
+61. /C:/Users/antho/Downloads/OmniReach/src/assets/items/blankets.ts
+What: Adjusted the standalone blanket definitions to align their colors, labels, and roll size with the broader realism pass.
+Why: Blanket assets should match the same believable packaging and scale rules as the rest of the catalog.
+
+62. /C:/Users/antho/Downloads/OmniReach/src/assets/items/hygiene.ts
+What: Refactored the soap, toothpaste, toothbrush, and sanitizer visuals with clearer packaging, more natural consumer colors, and a more normal sanitizer bottle profile.
+Why: The hygiene items needed to look like everyday hygiene supplies instead of flat white/gray placeholders.
+
+63. /C:/Users/antho/Downloads/OmniReach/src/assets/items/hydration.ts
+What: Ran a second hydration pass that lays the bottle and filter into clearer top-down orientations, shrinks their footprint, and adds stronger overhead label blocks.
+Why: From the actual tray view, the hydration items were still reading like generic circles/cylinders instead of recognizable day-to-day objects.
+
+64. /C:/Users/antho/Downloads/OmniReach/src/assets/items/medical.ts
+What: Ran a second medical pass to shrink the injector and packaged supplies and make their top faces much more legible with stronger color coding and larger symbols.
+Why: The top-down gameplay view made several medical items too similar to identify quickly.
+
+65. /C:/Users/antho/Downloads/OmniReach/src/assets/items/hygiene.ts
+What: Ran a second hygiene pass to reduce item size further and convert the sanitizer into a flatter pump-bottle silhouette with clearer overhead labeling.
+Why: The overhead view showed that several hygiene items still blended together or looked too large on the tray.
+
+66. /C:/Users/antho/Downloads/OmniReach/src/assets/items/hydration.ts
+What: Recreated the hydration items from the ground up with flatter everyday silhouettes, stronger label bands, and smaller footprints tuned for the tray camera.
+Why: The old bottle and filter still read like generic cylinders from overhead instead of recognizable day-to-day hydration objects.
+
+67. /C:/Users/antho/Downloads/OmniReach/src/assets/items/medical.ts
+What: Rebuilt the medical set around a top-down-first design language with simpler semi-realistic forms, stronger color coding, and clearer packaging symbols.
+Why: The medical items needed to be identifiable immediately from above, not just realistic from side angles.
+
+68. /C:/Users/antho/Downloads/OmniReach/src/assets/items/nutrition.ts
+What: Recreated the food package layouts with more readable pouch and sachet labels, clearer consumer packaging blocks, and tighter proportions.
+Why: Nutrition items were still blending into the tray as anonymous rectangles.
+
+69. /C:/Users/antho/Downloads/OmniReach/src/assets/items/ppe.ts
+What: Rebuilt the PPE items with broader top silhouettes and stronger internal detail so the mask and hard hat are recognizable at a glance.
+Why: The PPE props needed clearer overhead profiles and less dependence on side-view shape.
+
+70. /C:/Users/antho/Downloads/OmniReach/src/assets/items/equipment.ts
+What: Recreated the equipment items with distinct top-down forms, including clearer radio, tarp, tourniquet, and blanket packaging details.
+Why: The central tray clusters still looked too similar and oversized after the earlier partial passes.
+
+71. /C:/Users/antho/Downloads/OmniReach/src/assets/items/tools.ts
+What: Rebuilt the tool items with simpler overhead-friendly silhouettes and stronger visual separation between the multitool, flashlight, compass, and radio handset.
+Why: The tool row still read as repeated gray bars from the tray camera.
+
+72. /C:/Users/antho/Downloads/OmniReach/src/assets/items/blankets.ts
+What: Recreated the blanket items so the emergency pack and rolled wool blanket follow the same top-down readable style as the rest of the catalog.
+Why: The blanket assets needed to match the new tray-view design language instead of preserving older side-view-first shapes.
+
+73. /C:/Users/antho/Downloads/OmniReach/src/assets/items/hygiene.ts
+What: Rebuilt the hygiene items with flatter product-style packaging, clearer labels, and a more identifiable sanitizer bottle and toothbrush kit.
+Why: The hygiene group still had too many shapes that blended together from above.
+
+74. /C:/Users/antho/Downloads/OmniReach/App.tsx
+What: Removed the bottom timeline/control strip and cleaned the now-unused chart/state imports that only supported that panel.
+Why: The user wanted the entire lower timeline bar removed, and leaving the dead chart plumbing behind would have caused lint noise and unnecessary UI state.
+
+75. /C:/Users/antho/Downloads/OmniReach/src/agents/DeliveryAgent.ts
+What: Stopped DeliveryAgent from emitting MISSION_COMPLETE directly after arrival.
+Why: Final mission completion must happen after ActionAgent finishes the incident export and partner handoff, otherwise missions can close early and skip the final outward actions.
+
+76. /C:/Users/antho/Downloads/OmniReach/src/agents/RoboticsAgent.ts
+What: Cleared cached mission execution context on robotics failure/stop.
+Why: Stale robotics contexts could linger across failed or interrupted runs and make later completions harder to reason about.
+
+77. /C:/Users/antho/Downloads/OmniReach/src/tests/DeliveryAgent.test.ts
+What: Updated the delivery test to assert arrival is the last delivery-owned event instead of expecting mission completion from DeliveryAgent.
+Why: Delivery no longer finalizes missions directly now that completion is owned by ActionAgent after handoff.
+
+78. /C:/Users/antho/Downloads/OmniReach/src/tests/Integration.test.ts
+What: Tightened the integration test to verify action handoff completes before mission completion on a per-mission basis.
+Why: The corrected flow still allows multiple missions during auto-deploy, so the assertion needed to follow one completed child mission instead of counting all completions globally.
+
+79. /C:/Users/antho/Downloads/OmniReach/App.tsx
+What: Scoped the Socket.IO cleanup to the exact mission handlers registered by the App component.
+Why: Using bare `socket.off('mission_init')` and `socket.off('mission_state')` would remove every listener for those events, which is brittle once more UI listeners are added.
+
+80. /C:/Users/antho/Downloads/OmniReach/App.tsx
+What: Stabilized robot-view boot behavior by keeping `selectedZone` identity stable across repeated mission-state broadcasts and replacing the clear-and-reselect retry hack with an explicit simulation boot nonce.
+Why: Fresh `selectedZone` objects from Socket.IO updates could trigger unnecessary MuJoCo reinitialization, and the old retry flow was forcing a full zone reset just to reboot the sim.
+
+81. /C:/Users/antho/Downloads/OmniReach/App.tsx
+What: Anchored map markers with fixed containers, hid report/history actions until mission activity exists, and refreshed the left-side mission console with clearer system state, supply controls, thinking cards, and an assembly mini-map.
+Why: The trial-run UI needed more stable map behavior and clearer operator feedback instead of always-on utility actions and placeholder status blocks.
+
+82. /C:/Users/antho/Downloads/OmniReach/App.tsx
+What: Rebuilt the right-side intervention panel into a live operations view with agent reasoning, a robotics snapshot with Gemini detection overlay, structured Gemini Robotics JSON output, and a more informative waiting state.
+Why: The frontend needed to show what the agents and robotics stack are actually doing during a run so the mission feels understandable and polished in real time.

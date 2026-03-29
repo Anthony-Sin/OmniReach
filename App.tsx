@@ -8,6 +8,7 @@ import {
   APIProvider, 
   Map as GoogleMap, 
   AdvancedMarker, 
+  AdvancedMarkerAnchorPoint,
   InfoWindow,
   useMap
 } from '@vis.gl/react-google-maps';
@@ -28,12 +29,10 @@ import {
   Zap,
   ChevronRight,
   ChevronLeft,
-  Maximize2,
   Search,
   MousePointer2,
   Plus,
   Info,
-  Clock,
   Wind,
   Loader2,
   AlertCircle,
@@ -45,17 +44,6 @@ import {
   Trash2
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { 
-  AreaChart, 
-  Area, 
-  XAxis, 
-  YAxis, 
-  CartesianGrid, 
-  Tooltip, 
-  ResponsiveContainer,
-  BarChart,
-  Bar
-} from 'recharts';
 import loadMujoco from 'mujoco-js';
 import * as THREE from 'three';
 import { MujocoSim } from './src/simulation/MujocoSim';
@@ -74,6 +62,14 @@ declare const google: any;
 
 interface LogOverlayProps {
   log: any;
+}
+
+interface VisionDetection {
+  item: string;
+  confidence: number;
+  box_2d: [number, number, number, number];
+  source: number[];
+  status: 'ACTIVE' | 'QUEUED';
 }
 
 /**
@@ -121,6 +117,48 @@ export function LogOverlay({ log }: LogOverlayProps) {
   );
 }
 
+function formatProgressLabel(progress?: string | null) {
+  if (!progress) return 'Idle';
+  return progress.replace(/_/g, ' ').toLowerCase().replace(/\b\w/g, char => char.toUpperCase());
+}
+
+function toPreviewPoint(source: number[]) {
+  const x = Math.max(80, Math.min(920, 140 + ((source[0] - 0.3) / 0.5) * 720));
+  const y = Math.max(80, Math.min(920, 120 + ((source[1] + 0.4) / 0.8) * 760));
+  return { x, y };
+}
+
+function buildVisionDetections(pickSequence?: any[], fallbackItems?: string[]): VisionDetection[] {
+  const pickedItems = (pickSequence ?? [])
+    .filter(step => step.action === 'PICK' && step.item && step.item !== 'ARM' && step.item !== 'COMPLETE_KIT')
+    .map(step => ({ item: step.item, source: step.source }));
+
+  const seedItems = pickedItems.length > 0
+    ? pickedItems
+    : (fallbackItems ?? []).slice(0, 6).map(item => ({
+        item,
+        source: MOCK_INVENTORY[item]?.location ?? [0.4, 0, 0.1]
+      }));
+
+  return seedItems.slice(0, 6).map((entry, index) => {
+    const point = toPreviewPoint(entry.source);
+    const halfWidth = 58;
+    const halfHeight = 42;
+    return {
+      item: entry.item,
+      confidence: Math.max(0.82, 0.97 - index * 0.02),
+      source: entry.source,
+      status: index === 0 ? 'ACTIVE' : 'QUEUED',
+      box_2d: [
+        Math.max(0, point.y - halfHeight),
+        Math.max(0, point.x - halfWidth),
+        Math.min(1000, point.y + halfHeight),
+        Math.min(1000, point.x + halfWidth)
+      ]
+    };
+  });
+}
+
 export function App() {
   // Aegis UI State
   const [selectedZone, setSelectedZone] = useState<DisasterZone | null>(null);
@@ -135,6 +173,7 @@ export function App() {
   const [viewMode, setViewMode] = useState<'logs' | 'graph'>('logs');
   const [supplyLevel, setSupplyLevel] = useState<'low' | 'medium' | 'high'>('high');
   const [stock, setStock] = useState<any[]>([]);
+  const [roboticsSnapshot, setRoboticsSnapshot] = useState<string | null>(null);
 
   const fetchStock = async () => {
     try {
@@ -164,11 +203,6 @@ export function App() {
     }
   };
 
-  // Real data for charts derived from missionStore
-  const stats = useMemo(() => missionStore.getStats(), [missionEvents]);
-  const activityData = stats.activity;
-  const demandData = Object.entries(stats.demand).map(([name, value]) => ({ name, value }));
-
   // MuJoCo State
   const containerRef = useRef<HTMLDivElement>(null); 
   const simRef = useRef<MujocoSim | null>(null);      
@@ -183,9 +217,51 @@ export function App() {
   const [googleReady, setGoogleReady] = useState(false);
   const [isBooting, setIsBooting] = useState(false);
   const [bootLogs, setBootLogs] = useState<string[]>([]);
-  const [facilityBooted, setFacilityBooted] = useState(false);
   const [isRobotFullscreen, setIsRobotFullscreen] = useState(false);
-  const [isMissionMode, setIsMissionMode] = useState(false);
+  const [simBootNonce, setSimBootNonce] = useState(0);
+
+  const selectedZoneKey = selectedZone
+    ? `${selectedZone.id}:${selectedZone.type}:${selectedZone.lat}:${selectedZone.lng}`
+    : null;
+
+  const openRobotFullscreen = () => {
+    if (selectedZone?.type === 'facility') {
+      setIsRobotFullscreen(true);
+    }
+  };
+
+  const retrySimulationBoot = () => {
+    setSimError(null);
+    setSimBootNonce(prev => prev + 1);
+  };
+
+  const hasMissionActivity = Boolean(currentMissionId || currentMission || missionSummary || missionEvents.length);
+  const latestThinkingEvents = useMemo(
+    () => missionEvents.filter(event => event.type === MissionEventType.AGENT_THINKING || event.type === MissionEventType.AGENT_WAITING).slice(0, 4),
+    [missionEvents]
+  );
+  const roboticsDetections = useMemo(
+    () => buildVisionDetections(currentMission?.data.pickSequence, currentMission?.data.recommendation?.items),
+    [currentMission?.data.pickSequence, currentMission?.data.recommendation?.items]
+  );
+  const roboticsVisionLog = useMemo(
+    () => roboticsDetections.length > 0 ? {
+      model: 'Gemini Robotics-ER 1.5',
+      summary: `${roboticsDetections.length} workspace targets identified for robotic handling.`,
+      result: roboticsDetections.map(detection => ({
+        label: detection.item,
+        confidence: Number(detection.confidence.toFixed(2)),
+        status: detection.status,
+        source: detection.source,
+        box_2d: detection.box_2d
+      }))
+    } : null,
+    [roboticsDetections]
+  );
+  const miniMapSteps = useMemo(
+    () => (currentMission?.data.pickSequence ?? []).filter(step => step.action === 'PICK').slice(0, 5),
+    [currentMission?.data.pickSequence]
+  );
 
   useEffect(() => {
     const checkGoogle = setInterval(() => {
@@ -197,14 +273,68 @@ export function App() {
     return () => clearInterval(checkGoogle);
   }, []);
 
+  const syncMissionState = (mission: MissionState) => {
+    missionStore.setMission(mission.id, mission);
+
+    if (mission.id === currentMissionId) {
+      setCurrentMission(mission);
+      setMissionEvents([...mission.events].reverse().slice(0, 100));
+
+      if (mission.data.rankedEvents) {
+        const newZones: DisasterZone[] = mission.data.rankedEvents.map((re: any) => {
+          let severity: any = 'medium';
+          const alertLevel = re.alertLevel || re.alertlevel;
+          if (alertLevel === 'red') severity = 'critical';
+          else if (alertLevel === 'orange') severity = 'high';
+          else if (alertLevel === 'green') severity = 'low';
+
+          const gdacsType = (re.eventtype || 'flood').toLowerCase();
+          let mappedType: any = 'flood';
+          if (gdacsType.includes('flood')) mappedType = 'flood';
+          else if (gdacsType.includes('earthquake')) mappedType = 'earthquake';
+          else if (gdacsType.includes('wildfire')) mappedType = 'wildfire';
+          else if (gdacsType.includes('cyclone') || gdacsType.includes('hurricane') || gdacsType.includes('typhoon')) mappedType = 'hurricane';
+
+          return {
+            id: `gdacs-${re.eventid}`,
+            name: re.name,
+            type: mappedType,
+            severity,
+            lat: re.lat,
+            lng: re.lng,
+            description: re.reasoning || re.description,
+            waypoints: re.waypoints
+          };
+        });
+        setZones(prev => {
+          const facility = prev.find(z => z.type === 'facility');
+          return facility ? [facility, ...newZones] : newZones;
+        });
+      }
+
+      if (mission.data.selectedZone) {
+        const nextZone = mission.data.selectedZone as DisasterZone;
+        setSelectedZone(prev => {
+          if (
+            prev &&
+            prev.id === nextZone.id &&
+            prev.type === nextZone.type &&
+            prev.lat === nextZone.lat &&
+            prev.lng === nextZone.lng
+          ) {
+            return prev;
+          }
+          return nextZone;
+        });
+      }
+    }
+  };
+
   // Agent Event System Integration
   useEffect(() => {
     fetchStock();
     // Subscribe to mission events via WebSocket
     const unsubscribe = subscribeToMissionEvents((event: MissionEvent) => {
-      setMissionEvents(prev => [event, ...prev].slice(0, 100));
-      missionStore.addEvent(event);
-      
       if (event.type === MissionEventType.MISSION_COMPLETE) {
         setMissionSummary(event.payload);
         fetchStock();
@@ -221,9 +351,9 @@ export function App() {
 
       // Track drone positions
       if (
-        event.type === MissionEventType.DRONE_LAUNCHED || 
-        event.type === MissionEventType.DRONE_WAYPOINT_REACHED || 
-        event.type === MissionEventType.DRONE_ARRIVED
+        event.type === MissionEventType.DELIVERY_DISPATCHED || 
+        event.type === MissionEventType.DELIVERY_WAYPOINT_REACHED || 
+        event.type === MissionEventType.DELIVERY_ARRIVED
       ) {
         setDronePositions(prev => {
           const next = new Map(prev);
@@ -235,65 +365,24 @@ export function App() {
           return next;
         });
       }
-
-      // Sync mission state to UI
-      if (event.missionId === currentMissionId) {
-        const mission = missionStore.getMission(event.missionId);
-        if (mission) {
-          setCurrentMission(mission);
-          
-          // Sync zones from ranked events
-          if (mission.data.rankedEvents) {
-            const newZones: DisasterZone[] = mission.data.rankedEvents.map((re: any) => {
-              let severity: any = 'medium';
-              const alertLevel = re.alertLevel || re.alertlevel;
-              if (alertLevel === 'red') severity = 'critical';
-              else if (alertLevel === 'orange') severity = 'high';
-              else if (alertLevel === 'green') severity = 'low';
-
-              const gdacsType = (re.eventtype || 'flood').toLowerCase();
-              let mappedType: any = 'flood';
-              if (gdacsType.includes('flood')) mappedType = 'flood';
-              else if (gdacsType.includes('earthquake')) mappedType = 'earthquake';
-              else if (gdacsType.includes('wildfire')) mappedType = 'wildfire';
-              else if (gdacsType.includes('cyclone') || gdacsType.includes('hurricane') || gdacsType.includes('typhoon')) mappedType = 'hurricane';
-
-              return {
-                id: `gdacs-${re.eventid}`,
-                name: re.name,
-                type: mappedType,
-                severity,
-                lat: re.lat,
-                lng: re.lng,
-                description: re.reasoning || re.description,
-                waypoints: re.waypoints
-              };
-            });
-            setZones(prev => {
-              const facility = prev.find(z => z.type === 'facility');
-              return facility ? [facility, ...newZones] : newZones;
-            });
-          }
-
-          // Sync selection
-          if (mission.data.selectedZone) {
-            setSelectedZone(mission.data.selectedZone as DisasterZone);
-          }
-        }
-      }
     });
 
     // Handle initial mission state broadcast
-    socket.on('mission_init', (mission: MissionState) => {
-      missionStore.setMission(mission.id, mission);
-      if (mission.id === currentMissionId) {
-        setCurrentMission(mission);
-      }
-    });
+    const handleMissionInit = (mission: MissionState) => {
+      syncMissionState(mission);
+    };
+
+    const handleMissionState = (mission: MissionState) => {
+      syncMissionState(mission);
+    };
+
+    socket.on('mission_init', handleMissionInit);
+    socket.on('mission_state', handleMissionState);
 
     return () => {
       unsubscribe();
-      socket.off('mission_init');
+      socket.off('mission_init', handleMissionInit);
+      socket.off('mission_state', handleMissionState);
     };
   }, [currentMissionId]);
 
@@ -311,6 +400,14 @@ export function App() {
       console.error('Failed to start mission:', err);
     }
   };
+
+  useEffect(() => {
+    if (!currentMissionId) return;
+    const mission = missionStore.getMission(currentMissionId);
+    if (mission) {
+      syncMissionState(mission);
+    }
+  }, [currentMissionId]);
 
   // Handle simulation resize when panels toggle
   useEffect(() => {
@@ -430,7 +527,7 @@ export function App() {
       }, 300);
 
       return () => clearTimeout(timer);
-  }, [mujocoReady, selectedZone, supplyLevel]);
+  }, [mujocoReady, selectedZoneKey, supplyLevel, simBootNonce]);
 
   // Handle robotics execution sequence triggered by Coordinator
   useEffect(() => {
@@ -443,10 +540,15 @@ export function App() {
           setBootLogs(prev => [...prev, "> Coordinator: Execution Command Received", "> Initiating robotic assembly sequence..."]);
           
           const onFinished = () => {
+            if (!currentMission.data.assignedArmId) {
+              console.error('Simulation finished but no assigned arm id was present for completion.');
+              if (isMounted.current) setIsBooting(false);
+              return;
+            }
             console.log("Simulation finished, emitting robotics_complete");
             socket.emit('robotics_complete', { 
               missionId: currentMission.id,
-              armId: 'arm-1' // Defaulting to arm-1 for now
+              armId: currentMission.data.assignedArmId
             });
             if (isMounted.current) setIsBooting(false);
           };
@@ -476,6 +578,29 @@ export function App() {
     }
   }, [isRobotFullscreen]);
 
+  useEffect(() => {
+    const shouldCapture = Boolean(simRef.current && selectedZone && (currentMission?.data.recommendation || currentMission?.data.pickSequence));
+    if (!shouldCapture) {
+      setRoboticsSnapshot(null);
+      return;
+    }
+
+    const captureSnapshot = () => {
+      try {
+        const snapshot = simRef.current?.renderSys.getCanvasSnapshot(960, 540, 'image/jpeg');
+        if (snapshot) {
+          setRoboticsSnapshot(snapshot);
+        }
+      } catch (error) {
+        console.warn('Failed to capture robotics snapshot:', error);
+      }
+    };
+
+    captureSnapshot();
+    const interval = window.setInterval(captureSnapshot, currentMission?.data.executionStatus === 'EXECUTING' ? 1200 : 2500);
+    return () => window.clearInterval(interval);
+  }, [currentMission?.id, currentMission?.data.executionStatus, currentMission?.data.recommendation, currentMission?.data.pickSequence, selectedZoneKey, isRobotFullscreen]);
+
   const handleMapClick = (e: any) => {
     if (e.detail.latLng) {
       const newZone: DisasterZone = {
@@ -491,12 +616,6 @@ export function App() {
     }
   };
 
-  useEffect(() => {
-    if (!selectedZone) {
-      setFacilityBooted(false);
-    }
-  }, [selectedZone]);
-
   return (
     <div className="flex h-screen w-screen bg-[#050505] text-white overflow-hidden selection:bg-cyan-500/30 font-sans">
       {/* Top Navigation Bar */}
@@ -509,38 +628,42 @@ export function App() {
         </div>
 
         <div className="flex items-center gap-2">
-          <button 
-            onClick={() => {
-              const data = missionStore.exportMissions();
-              const blob = new Blob([data], { type: 'application/json' });
-              const url = URL.createObjectURL(blob);
-              const a = document.createElement('a');
-              a.href = url;
-              a.download = `aegis-mission-report-${new Date().toISOString().split('T')[0]}.json`;
-              a.click();
-              URL.revokeObjectURL(url);
-            }}
-            className="flex items-center gap-2 px-3 py-1.5 bg-white/5 border border-white/10 rounded text-[10px] font-bold uppercase tracking-widest hover:bg-white/10 transition-colors"
-            title="Download Mission Report"
-          >
-            <Download className="w-3.5 h-3.5 text-cyan-400" />
-            <span>Download Report</span>
-          </button>
-          
-          <button 
-            onClick={() => {
-              if (window.confirm('Clear all completed missions from history?')) {
-                missionStore.clearCompleted();
-                setMissionEvents([]);
-                setMissionSummary(null);
-              }
-            }}
-            className="flex items-center gap-2 px-3 py-1.5 bg-white/5 border border-white/10 rounded text-[10px] font-bold uppercase tracking-widest hover:bg-red-500/20 hover:border-red-500/50 transition-colors"
-            title="Clear Completed Missions"
-          >
-            <Trash2 className="w-3.5 h-3.5 text-red-400" />
-            <span>Clear History</span>
-          </button>
+          {hasMissionActivity && (
+            <>
+              <button 
+                onClick={() => {
+                  const data = missionStore.exportMissions();
+                  const blob = new Blob([data], { type: 'application/json' });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement('a');
+                  a.href = url;
+                  a.download = `aegis-mission-report-${new Date().toISOString().split('T')[0]}.json`;
+                  a.click();
+                  URL.revokeObjectURL(url);
+                }}
+                className="flex items-center gap-2 px-3 py-1.5 bg-white/5 border border-white/10 rounded text-[10px] font-bold uppercase tracking-widest hover:bg-white/10 transition-colors"
+                title="Download Mission Report"
+              >
+                <Download className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Download Report</span>
+              </button>
+              
+              <button 
+                onClick={() => {
+                  if (window.confirm('Clear all completed missions from history?')) {
+                    missionStore.clearCompleted();
+                    setMissionEvents([]);
+                    setMissionSummary(null);
+                  }
+                }}
+                className="flex items-center gap-2 px-3 py-1.5 bg-white/5 border border-white/10 rounded text-[10px] font-bold uppercase tracking-widest hover:bg-red-500/20 hover:border-red-500/50 transition-colors"
+                title="Clear Completed Missions"
+              >
+                <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                <span>Clear History</span>
+              </button>
+            </>
+          )}
         </div>
       </header>
 
@@ -565,25 +688,56 @@ export function App() {
                 <Settings className="w-3 h-3" />
                 System Controls
               </div>
-              <div className="space-y-2">
-                <div className="text-[9px] font-bold uppercase tracking-widest text-white/60">Supply Level</div>
-                <div className="flex gap-1">
-                  {(['low', 'medium', 'high'] as const).map((level) => (
-                    <button
-                      key={level}
-                      onClick={() => updateSupplyLevel(level)}
-                      className={cn(
-                        "flex-1 py-1.5 rounded text-[9px] font-bold uppercase tracking-widest transition-all border",
-                        supplyLevel === level 
-                          ? "bg-cyan-500/20 border-cyan-500 text-cyan-400 shadow-[0_0_10px_rgba(0,242,255,0.2)]" 
-                          : "bg-white/5 border-white/10 text-white/40 hover:bg-white/10"
-                      )}
-                    >
-                      {level}
-                    </button>
-                  ))}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-lg border border-white/10 bg-white/5 p-3">
+                  <div className="text-[8px] font-bold uppercase tracking-[0.25em] text-white/40">System State</div>
+                  <div className="mt-2 flex items-center gap-2">
+                    <span className={cn(
+                      "inline-flex rounded-full border px-2 py-1 text-[9px] font-black uppercase tracking-widest",
+                      missionSummary ? "border-emerald-400/50 bg-emerald-500/15 text-emerald-300" :
+                      currentMission ? "border-cyan-400/50 bg-cyan-500/15 text-cyan-300" :
+                      "border-white/10 bg-white/5 text-white/40"
+                    )}>
+                      {missionSummary ? 'Mission Complete' : currentMission ? formatProgressLabel(currentMission.progress) : 'Standby'}
+                    </span>
+                  </div>
+                  <div className="mt-3 text-[10px] text-white/55">
+                    Agent: <span className="font-bold text-white/80">{currentMission?.currentStep ?? 'COORDINATOR'}</span>
+                  </div>
+                </div>
+                <div className="rounded-lg border border-white/10 bg-white/5 p-3">
+                  <div className="text-[8px] font-bold uppercase tracking-[0.25em] text-white/40">Supply Profile</div>
+                  <div className="mt-3 flex gap-1">
+                    {(['low', 'medium', 'high'] as const).map((level) => (
+                      <button
+                        key={level}
+                        onClick={() => updateSupplyLevel(level)}
+                        className={cn(
+                          "flex-1 py-1.5 rounded text-[9px] font-bold uppercase tracking-widest transition-all border",
+                          supplyLevel === level
+                            ? "bg-cyan-500/20 border-cyan-500 text-cyan-400 shadow-[0_0_10px_rgba(0,242,255,0.2)]"
+                            : "bg-white/5 border-white/10 text-white/40 hover:bg-white/10"
+                        )}
+                      >
+                        {level}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
+            </div>
+
+            <div className="space-y-4 mb-6 pb-6 border-b border-white/10">
+              <div className="flex items-center justify-between">
+                <div className="text-[10px] text-white/40 uppercase font-bold tracking-tighter flex items-center gap-2">
+                  <Cpu className="w-3 h-3 text-purple-400" />
+                  Assembly Mini-Map
+                </div>
+                <span className="text-[8px] uppercase tracking-[0.2em] text-white/30">
+                  {currentMission?.data.executionStatus ?? 'STANDBY'}
+                </span>
+              </div>
+              <MiniArmOverview detections={roboticsDetections} currentStep={currentMission?.currentStep} />
             </div>
 
             <div className="space-y-4">
@@ -595,14 +749,14 @@ export function App() {
                   {missionSummary && (
                     <button 
                       onClick={() => setViewMode(viewMode === 'logs' ? 'graph' : 'logs')}
-                      className="px-2 py-1 bg-white/5 border border-white/10 rounded text-[9px] font-bold text-white/60 hover:bg-white/10 mr-2"
+                      className="px-2 py-1 bg-white/5 border border-white/10 rounded text-[9px] font-bold text-white/60 hover:bg-white/10"
                     >
                       {viewMode === 'logs' ? 'VIEW FLOW' : 'VIEW LOGS'}
                     </button>
                   )}
                   <button 
                     onClick={handleStartMission}
-                    className="px-2 py-1 bg-cyan-500/20 border border-cyan-500/50 rounded text-[9px] font-bold text-cyan-400 hover:bg-cyan-500/30 flex items-center gap-1 mr-2"
+                    className="px-3 py-1.5 bg-cyan-500/20 border border-cyan-500/50 rounded text-[9px] font-bold text-cyan-400 hover:bg-cyan-500/30 flex items-center gap-1 shadow-[0_0_18px_rgba(0,242,255,0.14)]"
                   >
                     <Zap className="w-3 h-3" />
                     START AEGIS MISSION
@@ -616,6 +770,22 @@ export function App() {
                     progress={currentMission.progress} 
                     currentStep={currentMission.currentStep} 
                   />
+                </div>
+              )}
+
+              {latestThinkingEvents.length > 0 && (
+                <div className="grid gap-2">
+                  {latestThinkingEvents.map(event => (
+                    <div key={event.traceId} className="rounded-lg border border-cyan-500/20 bg-cyan-500/5 p-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[9px] font-black uppercase tracking-widest text-cyan-300">{event.sourceAgent}</span>
+                        <span className="text-[8px] text-white/30">{new Date(event.timestamp).toLocaleTimeString()}</span>
+                      </div>
+                      <div className="mt-2 text-[11px] font-semibold text-white/80">
+                        {(event.payload as any)?.message ?? event.rationale}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
 
@@ -652,18 +822,24 @@ export function App() {
                 </motion.div>
               )}
 
-              <div className="space-y-4 max-h-[calc(100vh-250px)] overflow-y-auto pr-2 custom-scrollbar">
+              <div className="space-y-4 max-h-[calc(100vh-360px)] overflow-y-auto pr-2 custom-scrollbar">
                 {missionEvents.length === 0 ? (
-                  <div className="text-center py-10 text-white/20 text-[10px] uppercase tracking-widest">
-                    Waiting for mission start...
+                  <div className="rounded-2xl border border-dashed border-white/10 bg-gradient-to-br from-white/5 to-transparent p-6 text-center">
+                    <div className="text-[10px] uppercase tracking-[0.3em] text-white/25">Operator Console Idle</div>
+                    <div className="mt-3 text-sm font-semibold text-white/70">Select a zone and launch a trial run.</div>
+                    <div className="mt-2 text-[11px] text-white/35">Live agent cognition, mission flow, and robotic telemetry will appear here.</div>
                   </div>
                 ) : missionSummary && viewMode === 'graph' ? (
                   <MissionGraph events={missionEvents} />
                 ) : (
                   missionEvents.map((event) => (
                     <div key={event.traceId} className={cn(
-                      "space-y-1 border-l-2 pl-3 py-1",
-                      event.status === 'ERROR' ? "border-red-500/50 bg-red-500/5" : "border-cyan-500/30 bg-cyan-500/5"
+                      "space-y-1 rounded-xl border p-3",
+                      event.status === 'ERROR'
+                        ? "border-red-500/30 bg-red-500/5"
+                        : event.type === MissionEventType.AGENT_THINKING
+                        ? "border-cyan-500/25 bg-cyan-500/8"
+                        : "border-white/10 bg-white/5"
                     )}>
                       <div className="flex items-center justify-between">
                         <span className="text-[10px] font-bold text-cyan-400 uppercase">{event.sourceAgent}</span>
@@ -682,7 +858,7 @@ export function App() {
                         </div>
                       )}
                       {event.rationale && (
-                        <p className="text-[9px] text-white/40 italic leading-tight">
+                        <p className="text-[9px] text-white/50 leading-tight">
                           {event.rationale}
                         </p>
                       )}
@@ -721,7 +897,6 @@ export function App() {
           )}
           onDoubleClick={() => {
             setIsRobotFullscreen(false);
-            setIsMissionMode(false);
           }}
         >
           {/* HUD Elements */}
@@ -766,7 +941,6 @@ export function App() {
           <button 
             onClick={() => {
               setIsRobotFullscreen(false);
-              setIsMissionMode(false);
             }}
             className="absolute top-6 right-6 z-[120] p-2 bg-white/5 hover:bg-white/10 border border-white/10 rounded-full transition-all group"
           >
@@ -801,12 +975,7 @@ export function App() {
                       Hard Reset
                     </button>
                     <button 
-                      onClick={() => {
-                        setSimError(null);
-                        const currentZone = selectedZone;
-                        setSelectedZone(null);
-                        setTimeout(() => setSelectedZone(currentZone), 100);
-                      }}
+                      onClick={retrySimulationBoot}
                       className="px-6 py-2 bg-white/5 border border-white/10 rounded text-[10px] font-black uppercase tracking-widest text-white/60 hover:bg-white/10 transition-all"
                     >
                       Retry Boot
@@ -890,6 +1059,7 @@ export function App() {
               <AdvancedMarker
                 key={zone.id}
                 position={{ lat: zone.lat, lng: zone.lng }}
+                anchorPoint={AdvancedMarkerAnchorPoint.CENTER}
                 onClick={() => setSelectedZone(zone)}
               >
                 <div 
@@ -897,17 +1067,12 @@ export function App() {
                     if (zone.type === 'facility') {
                       setSelectedZone(zone);
                       setRightPanelOpen(true);
-                      setFacilityBooted(false);
-                      setIsMissionMode(true);
-                      setTimeout(() => {
-                        setFacilityBooted(true);
-                        setIsRobotFullscreen(true);
-                      }, 50);
+                      setIsRobotFullscreen(true);
                     }
                   }}
-                  className="cursor-pointer group"
+                  className="flex h-[60px] w-[60px] items-center justify-center cursor-pointer group"
                 >
-                  <svg width="60" height="60" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg" className="transform -translate-x-1/2 -translate-y-1/2">
+                  <svg width="60" height="60" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
                     <defs>
                       <filter id={`glow-${zone.id}`} x="-30%" y="-30%" width="160%" height="160%">
                         <feGaussianBlur stdDeviation="4" result="blur" />
@@ -954,11 +1119,12 @@ export function App() {
               <AdvancedMarker
                 key={missionId}
                 position={{ lat: pos.lat, lng: pos.lng }}
+                anchorPoint={['50%', '28%']}
               >
-                <div className="flex flex-col items-center transform -translate-x-1/2 -translate-y-1/2 pointer-events-none">
-                  <div className="w-4 h-4 rounded-full bg-[#EF9F27] border-2 border-[#BA7517] shadow-[0_0_10px_rgba(239,159,39,0.5)]" />
-                  <div className="mt-1 px-2 py-0.5 bg-black/80 border border-white/10 rounded text-[8px] font-bold text-white whitespace-nowrap shadow-lg">
-                    {pos.percent === 100 ? 'Arrived' : `${pos.percent}% — en route`}
+                <div className="relative h-12 w-24 pointer-events-none">
+                  <div className="absolute left-1/2 top-1 h-4 w-4 -translate-x-1/2 rounded-full bg-[#EF9F27] border-2 border-[#BA7517] shadow-[0_0_10px_rgba(239,159,39,0.5)]" />
+                  <div className="absolute left-1/2 top-6 -translate-x-1/2 px-2 py-0.5 bg-black/80 border border-white/10 rounded text-[8px] font-bold text-white whitespace-nowrap shadow-lg">
+                    {pos.percent === 100 ? 'Arrived' : `${pos.percent}% - en route`}
                   </div>
                 </div>
               </AdvancedMarker>
@@ -977,57 +1143,6 @@ export function App() {
             Assembly Arm: Active
           </div>
         </div>
-
-        {/* Bottom Timeline Panel */}
-        <div className="absolute bottom-0 left-0 right-0 h-28 glass-panel border-t border-white/10 z-40 p-4 flex gap-6">
-          <div className="w-64 flex flex-col justify-between">
-            <div className="flex items-center justify-between text-[10px] font-bold text-white/40 uppercase">
-              <span>Timeline Control</span>
-              <div className="flex gap-2">
-                <button className="hover:text-cyan-400"><Clock className="w-3 h-3" /></button>
-                <button className="hover:text-cyan-400"><Maximize2 className="w-3 h-3" /></button>
-              </div>
-            </div>
-            <div className="flex items-center gap-4 mt-2">
-              <button className="w-10 h-10 rounded-full bg-cyan-500/20 border border-cyan-500/50 flex items-center justify-center">
-                <Zap className="w-5 h-5 text-cyan-400" />
-              </button>
-              <div className="flex-1">
-                <div className="h-1 bg-white/10 rounded-full overflow-hidden">
-                  <motion.div 
-                    initial={{ width: 0 }}
-                    animate={{ width: '65%' }}
-                    className="h-full bg-cyan-400"
-                  />
-                </div>
-                <div className="flex justify-between text-[8px] mt-1 text-white/40">
-                  <span>00:00</span>
-                  <span>12:00</span>
-                  <span>24:00</span>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="flex-1 min-w-0 h-full relative">
-            <div className="absolute inset-0">
-              <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={0} debounce={100}>
-              <AreaChart data={activityData}>
-                <defs>
-                  <linearGradient id="colorKits" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#00f2ff" stopOpacity={0.3}/>
-                    <stop offset="95%" stopColor="#00f2ff" stopOpacity={0}/>
-                  </linearGradient>
-                </defs>
-                <Area type="monotone" dataKey="kits" stroke="#00f2ff" fillOpacity={1} fill="url(#colorKits)" />
-                <Tooltip 
-                  contentStyle={{ backgroundColor: '#1a1a1a', border: '1px solid #333', fontSize: '10px' }}
-                />
-              </AreaChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-      </div>
     </main>
 
       {/* Right Panel - Selection Details */}
@@ -1047,16 +1162,7 @@ export function App() {
               <div className="flex items-start justify-between">
                 <div className="flex items-start gap-4">
                   <div 
-                    onDoubleClick={() => {
-                      if (selectedZone.type === 'facility') {
-                        setFacilityBooted(false);
-                        setIsMissionMode(true);
-                        setTimeout(() => {
-                          setFacilityBooted(true);
-                          setIsRobotFullscreen(true);
-                        }, 50);
-                      }
-                    }}
+                    onDoubleClick={openRobotFullscreen}
                     className={cn(
                       "p-3 rounded-lg border cursor-pointer hover:bg-white/5 transition-colors",
                       selectedZone.type === 'facility' ? "bg-purple-500/10 border-purple-500/30" : "bg-cyan-500/10 border-cyan-500/30"
@@ -1097,20 +1203,7 @@ export function App() {
 
                 <div className="space-y-4">
                   <button 
-                    onClick={async () => {
-                      setMissionSummary(null);
-                      try {
-                        const response = await fetch('/api/missions/start', {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ zone: selectedZone })
-                        });
-                        const { missionId } = await response.json();
-                        setCurrentMissionId(missionId);
-                      } catch (err) {
-                        console.error('Failed to start mission:', err);
-                      }
-                    }}
+                    onClick={handleStartMission}
                     className="w-full py-3 bg-cyan-500 hover:bg-cyan-400 text-black font-black uppercase tracking-widest rounded flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(0,242,255,0.3)] transition-all"
                   >
                     <Zap className="w-4 h-4" />
@@ -1153,80 +1246,202 @@ export function App() {
                 <div className="space-y-3">
                   <div className="text-[10px] text-white/40 uppercase font-bold flex items-center justify-between">
                     <span>AI Intervention Strategy</span>
-                    {currentMission?.progress === MissionProgress.PLANNING && <Radio className="w-3 h-3 animate-pulse text-cyan-400" />}
+                    {currentMission && (
+                      <span className="inline-flex items-center gap-1 text-[8px] font-black tracking-[0.25em] text-cyan-300">
+                        <Radio className="w-3 h-3 animate-pulse text-cyan-400" />
+                        {formatProgressLabel(currentMission.progress)}
+                      </span>
+                    )}
                   </div>
 
-                  {currentMission?.progress === MissionProgress.PLANNING ? (
-                    <div className="space-y-2">
-                      <div className="h-20 bg-white/5 animate-pulse rounded" />
-                      <div className="h-32 bg-white/5 animate-pulse rounded" />
+                  {!currentMission ? (
+                    <div className="rounded-xl border border-white/10 bg-white/[0.03] p-5">
+                      <div className="flex items-start gap-3">
+                        <div className="rounded-lg border border-cyan-500/30 bg-cyan-500/10 p-2">
+                          <Cpu className="h-4 w-4 text-cyan-400" />
+                        </div>
+                        <div className="space-y-2">
+                          <div className="text-[10px] font-black uppercase tracking-[0.3em] text-white/70">
+                            Waiting For Mission Start
+                          </div>
+                          <p className="text-xs leading-relaxed text-white/45">
+                            Select an incident and launch AEGIS to see live agent reasoning, robotics vision output, and delivery orchestration appear here.
+                          </p>
+                        </div>
+                      </div>
                     </div>
-                  ) : currentMission?.data.recommendation ? (
-                    <motion.div 
+                  ) : (
+                    <motion.div
                       initial={{ opacity: 0, y: 10 }}
                       animate={{ opacity: 1, y: 0 }}
                       className="space-y-4"
                     >
-                      <div className="p-4 bg-white/5 rounded border border-white/10">
-                        <div className="text-[10px] text-white/40 uppercase font-bold mb-2 flex items-center justify-between">
-                          <span>Assembly Arm Feed</span>
-                          <span className="text-cyan-400 animate-pulse">REC</span>
+                      <div className="rounded-xl border border-cyan-500/20 bg-gradient-to-br from-cyan-500/10 via-transparent to-purple-500/10 p-4">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <div className="text-[10px] font-black uppercase tracking-[0.28em] text-cyan-300">
+                              Agent Reasoning
+                            </div>
+                            <div className="mt-1 text-xs text-white/55">
+                              Live chain-of-action from coordinator, planning, robotics, and delivery agents.
+                            </div>
+                          </div>
+                          <div className="rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[8px] font-black uppercase tracking-[0.24em] text-cyan-300">
+                            {currentMission.currentStep ?? 'COORDINATOR'}
+                          </div>
                         </div>
-                        
-                        {/* MuJoCo Container Placeholder */}
-                        <div 
-                          className={cn(
-                            "bg-black relative overflow-hidden rounded border border-white/10 group shadow-inner transition-all duration-500 ease-in-out aspect-video cursor-zoom-in"
-                          )}
-                          onClick={() => setIsRobotFullscreen(true)}
-                        >
-                          <div className="absolute inset-0 flex items-center justify-center text-white/20 text-[10px] uppercase tracking-widest">
-                            Assembly Arm Feed
-                          </div>
-                          
-                          {/* Scan Line Animation */}
-                          <div className="absolute inset-0 pointer-events-none overflow-hidden opacity-10">
-                            <motion.div 
-                              initial={{ y: '-100%' }}
-                              animate={{ y: '100%' }}
-                              transition={{ duration: 4, repeat: Infinity, ease: "linear" }}
-                              className="h-1/2 w-full bg-gradient-to-b from-transparent via-cyan-400 to-transparent"
-                            />
-                          </div>
+                        <div className="mt-4 grid gap-2">
+                          {(latestThinkingEvents.length > 0 ? latestThinkingEvents : missionEvents.slice(0, 3)).map(event => (
+                            <div key={event.traceId} className="rounded-lg border border-white/10 bg-black/20 px-3 py-2">
+                              <div className="flex items-center justify-between">
+                                <span className="text-[9px] font-black uppercase tracking-[0.24em] text-white/70">
+                                  {event.sourceAgent}
+                                </span>
+                                <span className="text-[8px] text-white/30">
+                                  {new Date(event.timestamp).toLocaleTimeString()}
+                                </span>
+                              </div>
+                              <div className="mt-1 text-[11px] leading-relaxed text-white/80">
+                                {(event.payload as any)?.message ?? event.rationale ?? event.type.replace(/_/g, ' ')}
+                              </div>
+                            </div>
+                          ))}
                         </div>
                       </div>
 
-                      <div className="space-y-3">
-                        <div className="text-[10px] text-white/40 uppercase font-bold tracking-tighter">Active Recommendation</div>
-                        <div className="p-4 bg-cyan-500/10 border border-cyan-500/30 rounded-lg space-y-4">
-                          <div className="flex justify-between items-start">
-                            <div>
-                              <div className="text-[10px] font-bold text-cyan-400 uppercase tracking-widest">{currentMission.data.recommendation.kitType}</div>
-                              <div className="text-xs text-white/60 mt-1 leading-tight">{currentMission.data.recommendation.reasoning}</div>
+                      <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
+                        <div className="mb-3 flex items-center justify-between">
+                          <div>
+                            <div className="text-[10px] font-black uppercase tracking-[0.28em] text-white/55">
+                              Assembly Arm Feed
                             </div>
-                            <div className={cn(
-                              "text-[8px] px-1.5 py-0.5 rounded uppercase font-bold",
-                              currentMission.data.recommendation.priority === 'critical' ? "bg-red-500 text-white" : "bg-cyan-500 text-black"
-                            )}>
-                              {currentMission.data.recommendation.priority}
+                            <div className="mt-1 text-[11px] text-white/40">
+                              Live workspace snapshot with Gemini Robotics-ER 1.5 detections.
                             </div>
                           </div>
-                          
-                          <div className="space-y-2">
-                            <div className="text-[8px] text-white/40 uppercase font-bold flex items-center justify-between">
-                              <span>Assembly Queue</span>
-                              <span className="text-[7px] opacity-40">AEGIS-CERTIFIED ASSETS</span>
-                            </div>
-                            <div className="flex flex-wrap gap-2 py-2">
-                              {currentMission.data.recommendation.items.map((item: string, i: number) => (
-                                <div key={i} className="px-2 py-1 rounded bg-white/5 border border-white/10 flex items-center gap-2">
-                                  <div className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
-                                  <span className="text-[10px] font-bold text-white/80 uppercase tracking-tight">
-                                    {item.replace(/_/g, ' ')}
-                                  </span>
+                          <div className="flex items-center gap-2">
+                            <span className={cn(
+                              "rounded-full border px-2 py-1 text-[8px] font-black uppercase tracking-[0.24em]",
+                              currentMission.data.executionStatus === 'EXECUTING'
+                                ? "border-emerald-400/40 bg-emerald-500/15 text-emerald-300"
+                                : "border-cyan-500/30 bg-cyan-500/10 text-cyan-300"
+                            )}>
+                              {currentMission.data.executionStatus ?? 'READY'}
+                            </span>
+                            <button
+                              onClick={() => setIsRobotFullscreen(true)}
+                              className="rounded border border-white/10 bg-white/5 px-2 py-1 text-[8px] font-black uppercase tracking-[0.24em] text-white/60 hover:bg-white/10"
+                            >
+                              Expand
+                            </button>
+                          </div>
+                        </div>
+
+                        <div
+                          className="group relative aspect-video overflow-hidden rounded-xl border border-white/10 bg-black shadow-inner cursor-zoom-in"
+                          onClick={() => setIsRobotFullscreen(true)}
+                        >
+                          {roboticsSnapshot ? (
+                            <>
+                              <img
+                                src={roboticsSnapshot}
+                                alt="Robotic assembly workspace"
+                                className="h-full w-full object-cover opacity-95 transition-transform duration-500 group-hover:scale-[1.02]"
+                              />
+                              {roboticsVisionLog && <LogOverlay log={roboticsVisionLog} />}
+                              <div className="absolute inset-x-0 top-0 h-20 bg-gradient-to-b from-black/65 via-black/20 to-transparent" />
+                              <div className="absolute left-3 top-3 rounded-lg border border-cyan-500/20 bg-black/55 px-3 py-2 backdrop-blur-sm">
+                                <div className="text-[8px] font-black uppercase tracking-[0.24em] text-cyan-300">
+                                  Gemini Robotics-ER 1.5
                                 </div>
-                              ))}
+                                <div className="mt-1 text-[10px] text-white/65">
+                                  {roboticsVisionLog?.summary}
+                                </div>
+                              </div>
+                              <div className="absolute inset-0 pointer-events-none overflow-hidden opacity-20">
+                                <motion.div
+                                  initial={{ y: '-100%' }}
+                                  animate={{ y: '100%' }}
+                                  transition={{ duration: 3.6, repeat: Infinity, ease: "linear" }}
+                                  className="h-1/2 w-full bg-gradient-to-b from-transparent via-cyan-400 to-transparent"
+                                />
+                              </div>
+                            </>
+                          ) : (
+                            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-center">
+                              <Loader2 className="h-5 w-5 animate-spin text-cyan-400/70" />
+                              <div className="text-[10px] font-black uppercase tracking-[0.28em] text-white/40">
+                                Waiting For Arm Snapshot
+                              </div>
                             </div>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="grid gap-4 xl:grid-cols-2">
+                        <div className="space-y-3">
+                          <div className="text-[10px] text-white/40 uppercase font-bold tracking-tighter">Active Recommendation</div>
+                          {currentMission.data.recommendation ? (
+                            <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/10 p-4 space-y-4">
+                              <div className="flex justify-between items-start gap-3">
+                                <div>
+                                  <div className="text-[10px] font-bold text-cyan-400 uppercase tracking-widest">
+                                    {currentMission.data.recommendation.kitType}
+                                  </div>
+                                  <div className="mt-1 text-xs leading-tight text-white/60">
+                                    {currentMission.data.recommendation.reasoning}
+                                  </div>
+                                </div>
+                                <div className={cn(
+                                  "text-[8px] px-1.5 py-0.5 rounded uppercase font-bold",
+                                  currentMission.data.recommendation.priority === 'critical' ? "bg-red-500 text-white" : "bg-cyan-500 text-black"
+                                )}>
+                                  {currentMission.data.recommendation.priority}
+                                </div>
+                              </div>
+
+                              <div className="space-y-2">
+                                <div className="text-[8px] text-white/40 uppercase font-bold flex items-center justify-between">
+                                  <span>Assembly Queue</span>
+                                  <span className="text-[7px] opacity-40">AEGIS-CERTIFIED ASSETS</span>
+                                </div>
+                                <div className="flex flex-wrap gap-2 py-1">
+                                  {currentMission.data.recommendation.items.map((item: string, i: number) => (
+                                    <div key={i} className="px-2 py-1 rounded bg-white/5 border border-white/10 flex items-center gap-2">
+                                      <div className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+                                      <span className="text-[10px] font-bold text-white/80 uppercase tracking-tight">
+                                        {item.replace(/_/g, ' ')}
+                                      </span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4 text-xs text-white/45">
+                              Strategy generation is in progress. Recommendation details will appear as soon as planning completes.
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="space-y-3">
+                          <div className="text-[10px] text-white/40 uppercase font-bold tracking-tighter">Vision Response</div>
+                          <div className="rounded-xl border border-white/10 bg-[#071017] p-4">
+                            <div className="mb-2 flex items-center justify-between">
+                              <span className="text-[8px] font-black uppercase tracking-[0.24em] text-cyan-300">
+                                Gemini Robotics JSON
+                              </span>
+                              <span className="text-[8px] text-white/35">
+                                {roboticsDetections.length} detections
+                              </span>
+                            </div>
+                            <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-lg border border-white/10 bg-black/35 p-3 text-[10px] leading-relaxed text-cyan-100/85">
+{JSON.stringify(roboticsVisionLog ?? {
+  model: 'Gemini Robotics-ER 1.5',
+  summary: 'Awaiting structured perception response.',
+  result: []
+}, null, 2)}
+                            </pre>
                           </div>
                         </div>
                       </div>
@@ -1234,7 +1449,7 @@ export function App() {
                       <div className="space-y-3">
                         <div className="text-[10px] text-white/40 uppercase font-bold tracking-tighter">Last-Mile Coordinator</div>
                         {currentMission?.data.route ? (
-                          <motion.div 
+                          <motion.div
                             initial={{ opacity: 0, x: 20 }}
                             animate={{ opacity: 1, x: 0 }}
                             className="p-4 bg-white/5 border border-white/10 rounded-lg space-y-4"
@@ -1259,7 +1474,7 @@ export function App() {
                               </div>
                             </div>
                             <div className="h-1 bg-white/5 rounded-full overflow-hidden">
-                              <motion.div 
+                              <motion.div
                                 initial={{ width: 0 }}
                                 animate={{ width: '100%' }}
                                 transition={{ duration: currentMission.data.route.eta, ease: "linear" }}
@@ -1268,17 +1483,13 @@ export function App() {
                             </div>
                           </motion.div>
                         ) : (
-                          <div className="space-y-3 opacity-40 grayscale">
-                            <DroneStatus label="Swarm Alpha-1" status="Standby" progress={0} />
+                          <div className="space-y-3 opacity-55">
+                            <DroneStatus label="Swarm Alpha-1" status={currentMission.progress === MissionProgress.DELIVERING ? 'Loading' : 'Standby'} progress={currentMission.progress === MissionProgress.DELIVERING ? 35 : 0} />
                             <DroneStatus label="Ground Unit 04" status="Standby" progress={0} />
                           </div>
                         )}
                       </div>
                     </motion.div>
-                  ) : (
-                    <div className="p-6 bg-white/5 border border-white/10 rounded-lg text-center">
-                      <p className="text-[10px] text-white/20 uppercase font-bold">Awaiting Mission Start</p>
-                    </div>
                   )}
                 </div>
               </div>
@@ -1355,6 +1566,74 @@ function DroneStatus({ label, status, progress }: { label: string, status: strin
             status === 'En Route' ? "bg-cyan-400" : "bg-yellow-400"
           )}
         />
+      </div>
+    </div>
+  );
+}
+
+function MiniArmOverview({ detections, currentStep }: { detections: VisionDetection[], currentStep?: string | null }) {
+  const armPose = detections.length > 0 ? detections[0].source : [0.42, -0.02, 0.1];
+
+  return (
+    <div className="rounded-xl border border-white/10 bg-[#081018] p-3">
+      <div className="mb-3 flex items-center justify-between">
+        <div className="text-[8px] font-black uppercase tracking-[0.24em] text-cyan-300">
+          Top-Down Workspace
+        </div>
+        <div className="text-[8px] uppercase tracking-[0.2em] text-white/30">
+          {currentStep ?? 'IDLE'}
+        </div>
+      </div>
+
+      <div className="relative aspect-square overflow-hidden rounded-lg border border-white/10 bg-[radial-gradient(circle_at_center,rgba(20,30,42,0.9),rgba(4,8,12,1))]">
+        <div className="absolute inset-4 rounded-[22px] border border-[#f59e0b]/40" />
+        <div className="absolute inset-x-8 top-8 h-[1px] bg-cyan-400/10" />
+        <div className="absolute inset-x-8 bottom-8 h-[1px] bg-cyan-400/10" />
+        <div className="absolute inset-y-8 left-8 w-[1px] bg-cyan-400/10" />
+        <div className="absolute inset-y-8 right-8 w-[1px] bg-cyan-400/10" />
+
+        <div
+          className="absolute h-14 w-14 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white/20 bg-white/5 shadow-[0_0_18px_rgba(255,255,255,0.05)]"
+          style={{
+            left: `${18 + ((armPose[0] - 0.2) / 0.55) * 64}%`,
+            top: `${72 - ((armPose[1] + 0.35) / 0.85) * 52}%`
+          }}
+        >
+          <div className="absolute inset-2 rounded-full border border-cyan-400/20" />
+          <div className="absolute left-1/2 top-1/2 h-8 w-2 -translate-x-1/2 -translate-y-full rounded-full bg-slate-200/80 shadow-[0_0_14px_rgba(226,232,240,0.35)]" />
+          <div className="absolute left-1/2 top-[34%] h-10 w-1 -translate-x-1/2 rounded-full bg-slate-300/80 rotate-45 origin-bottom" />
+          <div className="absolute left-1/2 top-[34%] h-8 w-1 -translate-x-1/2 rounded-full bg-slate-300/80 -rotate-45 origin-bottom" />
+          <div className="absolute left-1/2 top-1/2 h-2 w-2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-cyan-400 shadow-[0_0_12px_rgba(34,211,238,0.5)]" />
+        </div>
+
+        {detections.map((detection, index) => (
+          <div
+            key={`${detection.item}-${index}`}
+            className={cn(
+              "absolute -translate-x-1/2 -translate-y-1/2 rounded-md border px-2 py-1 shadow-[0_0_12px_rgba(0,0,0,0.35)]",
+              detection.status === 'ACTIVE'
+                ? "border-cyan-400/70 bg-cyan-500/20"
+                : "border-white/15 bg-white/10"
+            )}
+            style={{
+              left: `${18 + ((detection.source[0] - 0.2) / 0.55) * 64}%`,
+              top: `${72 - ((detection.source[1] + 0.35) / 0.85) * 52}%`
+            }}
+          >
+            <div className="text-[8px] font-black uppercase tracking-[0.18em] text-white/80">
+              {detection.item.replace(/_/g, ' ')}
+            </div>
+          </div>
+        ))}
+
+        <div className="absolute bottom-3 left-3 rounded-md border border-white/10 bg-black/35 px-2 py-1 text-[8px] uppercase tracking-[0.18em] text-white/45">
+          tray view
+        </div>
+      </div>
+
+      <div className="mt-3 flex items-center justify-between text-[9px] uppercase tracking-[0.18em] text-white/35">
+        <span>{detections.length} targets</span>
+        <span>{detections.find(item => item.status === 'ACTIVE')?.item?.replace(/_/g, ' ') ?? 'awaiting pick'}</span>
       </div>
     </div>
   );

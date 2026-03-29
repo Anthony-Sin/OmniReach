@@ -68,30 +68,22 @@ export class SentinelAgent {
 
   static async startMonitoring(missionId: string, context: any) {
     try {
-      // 1. Ingest latest GDACS feed with retry
+      // 1. Ingest latest GDACS feed with retry across multiple alert levels.
       const rawEvents = await withRetry(
-        async () => await fetchGDACSEvents('red'),
+        async () => await fetchGDACSEvents(['red', 'orange', 'green']),
         3,
-        1000,
-        this.lastSnapshot.length > 0 ? [] : undefined // Fallback to empty if we have snapshot, else throw
+        1000
       );
       
       if (!rawEvents || rawEvents.length === 0) {
-        // Attempt recovery from last snapshot if available
-        if (this.lastSnapshot.length > 0) {
-          console.warn('Empty feed detected. Recovering from last known good snapshot.');
-          this.emitAlerts(missionId, this.lastSnapshot, 'RECOVERY_SNAPSHOT', 0, context);
-          return;
-        }
-        
-        throw new Error('GDACS feed is empty and no recovery snapshot available.');
+        throw new Error('GDACS feed returned no events across monitored alert levels.');
       }
 
       // 2. Normalize and Deduplicate
       const normalized = this.normalizeEvents(rawEvents);
       const uniqueAlerts = this.deduplicate(normalized);
 
-      // 3. Save snapshot for recovery
+      // 3. Save the latest snapshot for diagnostics only.
       this.lastSnapshot = uniqueAlerts;
 
       // 4. Use Gemini for concise reasoning summary (retries handled in geminiService)
