@@ -1,0 +1,7 @@
+{
+  "name": "Remix: test1",
+  "description": "A reliable \u0027System of Agents\u0027 for disaster response, where agents observe, reason, and act through an A2A network for triage, planning, logistics, robotics, and delivery.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}

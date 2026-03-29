@@ -1,0 +1,111 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+  
+  --color-panel: #1a1a1a;
+  --color-panel-border: #333333;
+  --color-accent: #00f2ff;
+  --color-danger: #ff4444;
+}
+
+:root {
+  --bg: #050505;
+  --ink: #ffffff;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
+.glass-panel {
+  background: rgba(26, 26, 26, 0.8);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.07);
+}
+
+.glass-card {
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.neon-glow {
+  text-shadow: 0 0 10px var(--color-accent);
+}
+
+.neon-border {
+  box-shadow: 0 0 15px rgba(0, 242, 255, 0.3);
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-accent);
+}
+
+@keyframes pulse-soft {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.05); opacity: 0.8; }
+}
+
+.animate-pulse-soft {
+  animation: pulse-soft 3s infinite ease-in-out;
+}
+
+/* SVG Flowchart Styles */
+.node rect {
+  fill: rgba(255, 255, 255, 0.05);
+  stroke: rgba(255, 255, 255, 0.2);
+  transition: all 0.3s ease;
+}
+
+.node:hover rect {
+  stroke: var(--color-accent);
+  fill: rgba(0, 242, 255, 0.1);
+}
+
+.node text {
+  fill: white;
+  font-size: 10px;
+  font-family: var(--font-mono);
+}
+
+.node .th {
+  font-weight: bold;
+  font-size: 12px;
+}
+
+.arr {
+  stroke: rgba(255, 255, 255, 0.2);
+  stroke-width: 1.5;
+}
+
+.c-blue rect { stroke: #3b82f6; fill: rgba(59, 130, 246, 0.1); }
+.c-teal rect { stroke: #14b8a6; fill: rgba(20, 184, 166, 0.1); }
+.c-coral rect { stroke: #f43f5e; fill: rgba(244, 63, 94, 0.1); }
+.c-amber rect { stroke: #f59e0b; fill: rgba(245, 158, 11, 0.1); }
+.c-purple rect { stroke: #a855f7; fill: rgba(168, 85, 247, 0.1); }
+.c-cyan rect { stroke: #06b6d4; fill: rgba(6, 182, 212, 0.1); }
