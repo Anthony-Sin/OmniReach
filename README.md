@@ -1,7 +1,3 @@
-This is a comprehensive update to your `README.md`, transitioning the project from "Aegis" to **OMIREACH**. This version incorporates your new mission statement, the technical "A2A" (Analysis-to-Action) narrative, and the specific logic for mission efficiency.
-
----
-
 # 🌐 OMIREACH: Simulated Disaster-Response Workforce
 
 **OMIREACH** is an autonomous disaster-response system designed as a workforce of specialized agents, not a chatbot. It bridges the **Analysis-to-Action (A2A) Gap** by observing global incidents, reasoning across competing humanitarian needs, and generating simulated robotic logistics and operational handoff artifacts.
